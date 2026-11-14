@@ -359,10 +359,22 @@ async function exportChatMarkdown() {
   for (const m of state.chat.messages) {
     if (m.role === 'user') lines.push(`## Пользователь`, '', m.content || '', '');
     else if (m.role === 'assistant') {
-      lines.push(`## ${model.name}`, '', m.content || '', '');
-      (m.files || []).forEach((f) => lines.push(`Файл: \`${f.path}\``, ''));
+      // Шаг, где модель только вызвала инструмент, ничего не сказав, — это
+      // служебная запись. В экспорте от неё оставался пустой заголовок модели,
+      // из-за чего лента выглядела как повторяющиеся сообщения.
+      const hasText = (m.content || '').trim();
+      if (hasText) lines.push(`## ${model.name}`, '', m.content, '');
+      const files = m.files || [];
+      if (files.length) {
+        const paths = files.map((f) => `\`${f.path}\``).join(', ');
+        lines.push(hasText ? `Файл: ${paths}` : `## ${model.name}`, '', hasText ? '' : `Файл: ${paths}`, '');
+      }
     } else if (m.role === 'tool') {
-      lines.push(`> Инструмент \`${m.toolName}\` выполнен`, '');
+      // Ошибки инструментов полезны в экспорте, успешные вызовы дублируют
+      // карточки файлов выше.
+      if (m.toolResult && m.toolResult.error) {
+        lines.push(`> Инструмент \`${m.toolName}\`: ${String(m.toolResult.error).slice(0, 200)}`, '');
+      }
     }
   }
   const stats = state.chat.stats || {};

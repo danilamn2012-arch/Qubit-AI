@@ -42,6 +42,12 @@ export function formatBytes(n) {
   return `${(v / 1024 / 1024).toFixed(1).replace('.', ',')} МБ`;
 }
 
+/** Размер и число строк без хранения самого текста в сообщении. */
+export function fileStats(content) {
+  const text = String(content || '');
+  return { bytes: new Blob([text]).size, lines: text.split('\n').length };
+}
+
 function lineCount(text) {
   return String(text || '').split('\n').length;
 }
@@ -67,11 +73,15 @@ export function renderFileCard(file, opts = {}) {
   const path = file.path || '';
   const ext = (file.ext || extOf(path)).toUpperCase() || 'FILE';
   const status = file.status || 'created';
-  const bytes = file.content ? new Blob([file.content]).size : 0;
+  // В сообщении храним только размер и число строк: полный текст файла уже
+  // лежит в хранилище, дублировать его в истории чата незачем — на этом
+  // раздувался контекст (сотни тысяч токенов на одну правку).
+  const bytes = file.bytes != null ? file.bytes : file.content ? new Blob([file.content]).size : 0;
+  const lines = file.lines != null ? file.lines : file.content ? lineCount(file.content) : 0;
   const meta =
     status === 'deleted'
       ? 'Файл удалён'
-      : [formatBytes(bytes), `${lineCount(file.content)} стр.`, STATUS_LABEL[status] || 'обновлён'].join(' · ');
+      : [formatBytes(bytes), `${lines} стр.`, STATUS_LABEL[status] || 'обновлён'].join(' · ');
   const previewBtn =
     status !== 'deleted' && /\.html?$/i.test(path)
       ? `<button type="button" class="icon-btn icon-btn--sm" data-preview-path="${escapeHtml(

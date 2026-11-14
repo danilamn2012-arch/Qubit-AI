@@ -41,12 +41,28 @@ export const TOOLS = [
     function: {
       name: 'write_file',
       description:
-        'Создать новый файл или полностью заменить содержимое. Используй только для новых файлов или полной перезаписи; для правок вызывай edit_file.',
+        'Создать новый файл или полностью заменить содержимое. Используй для новых файлов и полной перезаписи. Большой файл нельзя уместить в один вызов — пиши его частями: write_file для первой части, затем append_file для остальных.',
       parameters: {
         type: 'object',
         properties: {
           path: { type: 'string', description: 'Путь файла относительно корня проекта' },
           content: { type: 'string', description: 'Полное содержимое файла' },
+        },
+        required: ['path', 'content'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'append_file',
+      description:
+        'Дописать текст в конец файла. Так собирают большие файлы по частям: сначала write_file с началом, потом append_file с продолжением. Не заменяет существующее содержимое.',
+      parameters: {
+        type: 'object',
+        properties: {
+          path: { type: 'string', description: 'Путь файла' },
+          content: { type: 'string', description: 'Текст, который нужно дописать в конец' },
         },
         required: ['path', 'content'],
       },
@@ -355,6 +371,9 @@ export async function runTurn(ctx) {
   // Подписи уже выполненных вызовов: если модель повторяет один и тот же вызов,
   // это цикл, а не работа. Тогда убираем инструменты и просим ответить текстом.
   const callCounts = new Map();
+  // Последнее прочитанное содержимое по пути: нужно, чтобы отличить
+  // бесполезное повторное чтение от законного — после правки файла.
+  const lastReads = new Map();
   let toolsDisabled = false;
 
   // История: системный промпт + сводка + сообщения
@@ -461,26 +480,57 @@ export async function runTurn(ctx) {
       break;
     }
 
-    // Инструменты уже отключены, а модель всё равно просит вызов — дальше
-    // повторять бесполезно, завершаем ход с понятным сообщением.
-    if (toolsDisabled) break;
+    // Инструменты отключены, а модель всё равно просит вызов: дальше повторять
+    // бесполезно. Завершаем ход сводкой о том, что уже сделано.
+    if (toolsDisabled) {
+      finalText = assistantText.trim() || summarizeWork(chat);
+      break;
+    }
 
     // Выполняем инструменты
     let repeated = 0;
     for (const call of toolCalls) {
-      // Считаем одинаковые вызовы (имя + аргументы). Три раза подряд один и
-      // тот же вызов — это цикл: дальше инструменты не даём.
+      // Считаем одинаковые вызовы (имя + аргументы). Второй такой же вызов уже
+      // бесполезен: результат тот же, а контекст растёт. Третий — явный цикл.
       const sig = `${call.name}:${JSON.stringify(call.args || {})}`;
       const times = (callCounts.get(sig) || 0) + 1;
       callCounts.set(sig, times);
-      if (times >= 3) repeated++;
+
+      // Повторное чтение неизменённого файла — безобидный, но бесполезный шаг.
+      // Его подавляем, но циклом не считаем: модель просто забыла, что уже
+      // читала. Иначе один лишний read_file выключал все инструменты.
+      const recForRead =
+        times >= 2 && call.name === 'read_file' && call.args?.path
+          ? await store.getFile(chat.id, normalizePath(call.args.path)).catch(() => null)
+          : null;
+      const staleRead = !!recForRead && lastReads.get(String(call.args.path)) === recForRead.content;
+
+      // Настоящий цикл — повтор действия, меняющего мир, или запроса в сеть.
+      // Подавленное повторное чтение циклом не считается: это забывчивость
+      // модели, наказывать за неё отключением всех инструментов незачем.
+      const isWorkRepeat = times >= 2 && call.name !== 'read_file';
+      if (isWorkRepeat) repeated++;
 
       onTool && onTool({ phase: 'start', call });
       let result;
       try {
-        if (times >= 3) {
+        if (staleRead) {
           result = {
-            error: 'Этот вызов уже выполнялся, результат не изменится. Ответь пользователю по уже полученным данным.',
+            ok: false,
+            repeated: true,
+            unchanged: true,
+            path: call.args?.path,
+            error: 'Файл не менялся с прошлого чтения — используй текст из истории.',
+          };
+        } else if (isWorkRepeat) {
+          // Повтор уже выполненного вызова: не тратим ни время, ни контекст.
+          result = {
+            ok: false,
+            repeated: true,
+            path: call.args?.path,
+            error:
+              `Этот вызов (${call.name}) уже выполнялся с теми же аргументами. ` +
+              'Результат не изменился — опирайся на него и продолжай.',
           };
         } else if (call.name === 'web_search') {
           const query = String(call.args?.query || '').trim();
@@ -507,6 +557,15 @@ export async function runTurn(ctx) {
           result = await executeTool(call, { chat, settings, files, model });
         }
         if (result.files) files = await store.listFiles(chat.id);
+        // Запоминаем прочитанное и сбрасываем кеш путей, которые изменились:
+        // после правки повторное чтение снова полезно.
+        if (call.name === 'read_file' && result.path && typeof result.content === 'string') {
+          lastReads.set(String(result.path), result.content);
+        }
+        if (result.file && result.file.path) {
+          lastReads.delete(String(result.file.path));
+          callCounts.delete(`read_file:${JSON.stringify({ path: result.file.path })}`);
+        }
         onTool && onTool({ phase: 'ok', call, result });
       } catch (err) {
         if (err.name === 'AbortError') throw err;
@@ -517,7 +576,7 @@ export async function runTurn(ctx) {
       const toolMsg = {
         id: 't-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 6),
         role: 'tool',
-        content: JSON.stringify(result).slice(0, 12000),
+        content: clipResult(result),
         toolCallId: call.id,
         toolName: call.name,
         toolArgs: call.args,
@@ -531,17 +590,16 @@ export async function runTurn(ctx) {
       if (result.deleted) msg.deleted = result.deleted;
     }
 
-    // Все вызовы раунда повторились — значит, модель зациклилась. Отключаем
-    // инструменты, чтобы следующий шаг был обычным текстовым ответом.
+    // Все вызовы раунда оказались настоящими повторами — значит, модель
+    // зациклилась. Отключаем инструменты, чтобы следующий шаг был текстом.
     if (repeated === toolCalls.length) toolsDisabled = true;
   }
 
   // Если модель так и не ответила текстом (упёрлась в лимит шагов или
   // зациклилась), добавляем понятное сообщение: пустой ответ выглядит как
-  // зависший интерфейс.
+  // зависший интерфейс. Но сначала пробуем описать уже сделанное.
   if (!finalText.trim() && !(signal && signal.aborted)) {
-    finalText =
-      'Не удалось закончить ответ: модель слишком долго вызывала инструменты. Уточните запрос или повторите его — часть работы уже сохранена.';
+    finalText = summarizeWork(chat);
     chat.messages.push({
       id: 'm-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 6),
       role: 'assistant',
@@ -591,6 +649,70 @@ function toApiMessage(m) {
   return null;
 }
 
+/**
+ * Урезает результат инструмента до лимита, не ломая JSON.
+ *
+ * Раньше строка обрезалась посимвольно: `JSON.stringify(result).slice(0, 12000)`
+ * давал невалидный JSON, и модель видела обрубок, из которого нельзя понять,
+ * что именно вернул инструмент. Теперь при превышении лимита отдаём валидный
+ * объект с явной пометкой, что данные усечены.
+ */
+function clipResult(result, limit = 12000) {
+  const text = JSON.stringify(result ?? {});
+  if (text.length <= limit) return text;
+
+  const note = { truncated: true, note: 'Результат был слишком большим и усечён.' };
+  // Для search и списков полезнее сохранить количество и первые элементы.
+  if (Array.isArray(result?.results)) {
+    const keep = Math.max(1, Math.min(result.results.length, 3));
+    return JSON.stringify({ ...result, results: result.results.slice(0, keep), ...note });
+  }
+  if (Array.isArray(result?.files)) {
+    return JSON.stringify({ ...result, files: result.files.slice(0, 30), ...note });
+  }
+  if (typeof result?.content === 'string') {
+    return JSON.stringify({ ...result, content: result.content.slice(0, 4000), ...note });
+  }
+  return JSON.stringify({
+    ...note,
+    preview: text.slice(0, 2000),
+    keys: result && typeof result === 'object' ? Object.keys(result) : [],
+  });
+}
+
+/**
+ * Итог хода, когда модель не сказала ничего внятного.
+ *
+ * Раньше агент писал «модель слишком долго вызывала инструменты» — это пугало
+ * и не объясняло, что осталось рабочим. Здесь перечисляем реально сделанное.
+ */
+function summarizeWork(chat) {
+  const recent = (chat.messages || []).slice(-24);
+  const created = [];
+  const edited = [];
+  recent.forEach((m) => {
+    (m.files || []).forEach((f) => {
+      if (!f.path) return;
+      if (f.status === 'created') created.push(f.path);
+      else edited.push(f.path);
+    });
+  });
+  const uniq = (arr) => [...new Set(arr)];
+  const files = uniq([...created, ...edited]);
+  const failed = recent.filter((m) => m.role === 'tool' && m.toolResult && m.toolResult.error).length;
+
+  const parts = ['Не удалось довести задачу до конца за отведённые шаги.'];
+  if (files.length) {
+    parts.push(
+      `\n\nФайлы в проекте: ${files.map((p) => `\`${p}\``).join(', ')}. ` +
+        'Их можно открыть и проверить — сделанное сохранено.',
+    );
+  }
+  if (failed) parts.push(`\n\nНеудачных вызовов инструментов: ${failed}.`);
+  parts.push('\n\nУточните задачу или попросите продолжить — я доработаю с этого места.');
+  return parts.join('');
+}
+
 /* --------------------------- Выполнение ------------------------------- */
 
 async function executeTool(call, { chat, settings, files, model, signal }) {
@@ -630,10 +752,15 @@ async function executeTool(call, { chat, settings, files, model, signal }) {
       if (typeof args.content !== 'string') throw new Error('Параметр content обязателен');
       const existed = await store.getFile(chat.id, path);
       await store.putFile(chat.id, path, args.content);
+      // Содержимое обратно в историю не отдаём: модель его только что написала
+      // сама, а каждый повтор раздувал контекст на размер файла.
       return {
         ok: true,
         action: existed ? 'overwritten' : 'created',
-        file: { path, content: args.content, ext: extOf(path), status: existed ? 'changed' : 'created' },
+        path,
+        bytes: new Blob([args.content]).size,
+        lines: args.content.split('\n').length,
+        file: { path, ext: extOf(path), status: existed ? 'changed' : 'created' },
       };
     }
 
@@ -665,7 +792,28 @@ async function executeTool(call, { chat, settings, files, model, signal }) {
         action: 'edited',
         path,
         applied,
-        file: { path, content, ext: extOf(path), status: 'edited' },
+        bytes: new Blob([content]).size,
+        lines: content.split('\n').length,
+        file: { path, ext: extOf(path), status: 'edited' },
+      };
+    }
+
+    case 'append_file': {
+      const path = normalizePath(args.path);
+      if (typeof args.content !== 'string') throw new Error('Параметр content обязателен');
+      const rec = await store.getFile(chat.id, path);
+      // Если файла ещё нет, append работает как создание: модель часто начинает
+      // с дописывания, и падать из-за этого не стоит.
+      const base = rec ? rec.content : '';
+      const next = base + args.content;
+      await store.putFile(chat.id, path, next);
+      return {
+        ok: true,
+        action: rec ? 'appended' : 'created',
+        path,
+        bytes: new Blob([next]).size,
+        lines: next.split('\n').length,
+        file: { path, ext: extOf(path), status: rec ? 'edited' : 'created' },
       };
     }
 

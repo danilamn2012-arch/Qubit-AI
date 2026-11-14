@@ -229,9 +229,17 @@ async function runAgentTurn(chat, model, signal) {
                     )}</span></div>`,
                   };
                 }
-                if (call.name === 'write_file' || call.name === 'edit_file') {
-                  const f = result.file || { path: call.args?.path, content: call.args?.content || '', status: 'changed' };
-                  return { call, card: renderFileCard({ ...f, status: f.status || 'changed' }) };
+                if (call.name === 'write_file' || call.name === 'edit_file' || call.name === 'append_file') {
+                  const f = result.file || { path: call.args?.path, status: 'changed' };
+                  return {
+                    call,
+                    card: renderFileCard({
+                      ...f,
+                      status: f.status || 'changed',
+                      bytes: result.bytes,
+                      lines: result.lines,
+                    }),
+                  };
                 }
                 return { call, card: renderToolChip({ name: call.name, args: call.args }, result) };
               }),

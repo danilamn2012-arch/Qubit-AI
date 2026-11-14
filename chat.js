@@ -282,10 +282,10 @@ function renderMessage(m) {
 
   if (m.role === 'tool') {
     // Файловые изменения видны карточками на сообщении ассистента, поэтому
-    // отдельная плашка не нужна. Но ошибку показать надо: иначе неудачная
-    // правка исчезает из ленты вместе с «в процессе».
-    const failed = m.toolResult && m.toolResult.error;
-    if (['write_file', 'edit_file', 'delete_file'].includes(m.toolName) && !failed) return '';
+    // отдельная плашка не нужна. Но ошибку и повтор показать надо: иначе
+    // неудачная правка исчезает из ленты вместе с «в процессе».
+    const failed = m.toolResult && (m.toolResult.error || m.toolResult.repeated);
+    if (['write_file', 'edit_file', 'append_file', 'delete_file'].includes(m.toolName) && !failed) return '';
     return `<div data-tool="${m.id}">${renderToolChip({ name: m.toolName, args: m.toolArgs }, m.toolResult)}</div>`;
   }
 
