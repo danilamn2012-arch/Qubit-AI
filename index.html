@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="ru" data-theme="light">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#f7f5ef" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#171613" media="(prefers-color-scheme: dark)" />
+    <meta
+      name="description"
+      content="Qubit AI — личный клиент для работы с нейросетями: чат, файлы проекта, предпросмотр и подсчёт расходов."
+    />
+    <title>Qubit AI</title>
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='9' fill='%23c15f3c'/%3E%3Cpath d='M16 6l2.6 7.4L26 16l-7.4 2.6L16 26l-2.6-7.4L6 16l7.4-2.6z' fill='%23fff'/%3E%3C/svg%3E"
+    />
+    <link rel="manifest" href="manifest.webmanifest" />
+    <script>
+      /* Раннее применение темы: убирает мигание при загрузке. */
+      (function () {
+        var pref = 'auto';
+        try {
+          var raw = localStorage.getItem('qubit.settings.v1');
+          if (raw) pref = JSON.parse(raw).theme || 'auto';
+        } catch (e) {}
+        var resolved =
+          pref === 'auto' ? (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light') : pref;
+        document.documentElement.setAttribute('data-theme', resolved);
+        document.documentElement.setAttribute('data-theme-pref', pref);
+      })();
+    </script>
+    <link rel="stylesheet" href="base.css" />
+    <link rel="stylesheet" href="app.css" />
+    <link rel="stylesheet" href="markdown.css" />
+  </head>
+  <body>
+    <div class="app" id="app">
+      <!-- Сайдбар -->
+      <aside class="sidebar" id="sidebar" aria-label="История чатов">
+        <div class="sidebar__head">
+          <a class="brand" href="./" aria-label="Qubit AI — на главную">
+            <span class="brand__name">Qubit AI<small>agent workspace</small></span>
+          </a>
+          <button class="icon-btn" id="btnSidebarClose" data-close-drawer aria-label="Закрыть меню">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round">
+              <path d="M6 6l12 12M18 6L6 18" />
+            </svg>
+          </button>
+        </div>
+
+        <button class="btn btn--primary btn--block" id="btnNewChat" style="margin-bottom: 10px">
+          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+            <path d="M12 5v14M5 12h14" />
+          </svg>
+          Новый чат
+        </button>
+
+        <div class="sidebar__search">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+            <circle cx="11" cy="11" r="7" />
+            <path d="M20 20l-3.5-3.5" />
+          </svg>
+          <input id="chatSearch" type="search" placeholder="Поиск по чатам" aria-label="Поиск по чатам" />
+        </div>
+
+        <div class="chat-list" id="chatList" role="list"></div>
+
+        <div class="sidebar__foot">
+          <div class="sidebar__usage" id="storageInfo" hidden></div>
+          <button class="nav-item" id="btnSettings" type="button">
+            <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" />
+              <circle cx="12" cy="12" r="3" />
+            </svg>
+            <span>Настройки</span>
+          </button>
+        </div>
+      </aside>
+
+      <div class="scrim" id="scrim" aria-hidden="true"></div>
+
+      <!-- Основная область -->
+      <main class="main">
+        <header class="topbar" id="topbar">
+          <button class="icon-btn topbar__menu" id="btnMenu" aria-label="Открыть меню">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round">
+              <path d="M4 7h16M4 12h16M4 17h16" />
+            </svg>
+          </button>
+
+          <div class="topbar__title" id="topTitle">
+            <strong>Новый чат</strong>
+            <span>Qubit AI</span>
+          </div>
+
+          <div class="topbar__actions">
+            <button class="ctx-meter" id="ctxMeter" type="button" title="Занятость контекста">
+              <span id="ctxLabel">0 %</span>
+              <span class="ctx-meter__bar"><span class="ctx-meter__fill" id="ctxFill" style="width: 0%"></span></span>
+            </button>
+            <button class="icon-btn" id="btnFiles" aria-label="Файлы проекта" title="Файлы проекта">
+              <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
+              </svg>
+            </button>
+            <button class="icon-btn" id="btnChatMenu" aria-label="Действия с чатом" title="Действия с чатом">
+              <svg width="19" height="19" viewBox="0 0 24 24" fill="currentColor">
+                <circle cx="6" cy="12" r="1.5" />
+                <circle cx="12" cy="12" r="1.5" />
+                <circle cx="18" cy="12" r="1.5" />
+              </svg>
+            </button>
+            <button class="icon-btn" id="btnNewChatTop" aria-label="Новый чат" title="Новый чат">
+              <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round">
+                <path d="M12 5v14M5 12h14" />
+              </svg>
+            </button>
+          </div>
+        </header>
+
+        <div class="view">
+          <div class="chat-scroll" id="chatScroll">
+            <div class="chat-inner" id="chatInner"></div>
+          </div>
+
+          <div class="composer-wrap">
+            <form class="composer" id="composer" autocomplete="off">
+              <div class="composer__attachments" id="attachments" hidden></div>
+              <textarea
+                id="prompt"
+                rows="1"
+                placeholder="Спросите что угодно или попросите создать файл…"
+                aria-label="Сообщение"
+              ></textarea>
+              <div class="composer__bar">
+                <div class="left">
+                  <button type="button" class="model-btn" id="btnModel" aria-haspopup="dialog">
+                    <span id="modelDot" style="width: 7px; height: 7px; border-radius: 50%; background: var(--accent); flex: none"></span>
+                    <span class="model-btn__name" id="modelName">Модель не выбрана</span>
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+                      <path d="M6 9l6 6 6-6" />
+                    </svg>
+                  </button>
+                  <button type="button" class="icon-btn" id="btnAttach" aria-label="Прикрепить изображение" title="Прикрепить изображение">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+                      <rect x="3" y="4" width="18" height="16" rx="2" />
+                      <circle cx="8.5" cy="9.5" r="1.5" />
+                      <path d="M4 18l5-5 4 4 3-3 4 4" />
+                    </svg>
+                  </button>
+                  <input type="file" id="fileInput" accept="image/*" multiple hidden />
+                </div>
+                <div class="right">
+                  <button type="submit" class="send-btn" id="btnSend" aria-label="Отправить" disabled>
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">
+                      <path d="M12 19V5" />
+                      <path d="M5 12l7-7 7 7" />
+                    </svg>
+                  </button>
+                </div>
+              </div>
+            </form>
+            <div class="composer-meta" id="composerMeta">
+              <span class="cost-pill" id="costPill" title="Расход текущей сессии">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round">
+                  <circle cx="9" cy="9" r="5" />
+                  <path d="M15.5 6.3A5 5 0 1 1 18 15" />
+                </svg>
+                <b id="costValue">0 ₽</b>
+                <span id="tokenValue">0 / 0 токенов</span>
+              </span>
+              <span class="spacer"></span>
+              <span class="composer-hint" id="composerHint">Enter — отправить, Shift+Enter — новая строка</span>
+            </div>
+          </div>
+        </div>
+      </main>
+    </div>
+
+    <div class="boot" id="boot">
+      <div class="boot__inner">
+        <span style="font-family: var(--font-serif); font-size: 22px; color: var(--text)">Qubit AI</span>
+        <span>Загружаю рабочее пространство…</span>
+      </div>
+    </div>
+
+    <script type="module" src="app.js"></script>
+  </body>
+</html>

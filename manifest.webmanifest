@@ -1,0 +1,19 @@
+{
+  "name": "Qubit AI",
+  "short_name": "Qubit",
+  "description": "Личный клиент для работы с нейросетями: чат, файлы проекта, предпросмотр.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#f7f5ef",
+  "theme_color": "#c15f3c",
+  "lang": "ru",
+  "icons": [
+    {
+      "src": "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 192 192'%3E%3Crect width='192' height='192' rx='42' fill='%23c15f3c'/%3E%3Cpath d='M96 36l15.6 44.4L156 96l-44.4 15.6L96 156l-15.6-44.4L36 96l44.4-15.6z' fill='%23fff'/%3E%3C/svg%3E",
+      "sizes": "192x192",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}
