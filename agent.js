@@ -818,10 +818,21 @@ async function executeTool(call, { chat, settings, files, model, signal, truncat
       let content = rec.content;
       const edits = Array.isArray(args.edits) ? args.edits : [];
       const applied = [];
+      // Правка, где старый и новый текст совпадают, ничего не меняет. Раньше она
+      // считалась успешной, модель думала, что дело сделано, и повторяла тот же
+      // вызов — отсюда «мои правки вышли пустыми» и защита от циклов.
+      const noop = edits.filter((e) => String(e.old_string ?? '') === String(e.new_string ?? ''));
+      if (edits.length && noop.length === edits.length) {
+        throw new Error(
+          'old_string и new_string совпадают — эта правка ничего не меняет. ' +
+            'Передай в new_string именно новый текст, который должен остаться в файле.',
+        );
+      }
       for (const e of edits) {
         const oldStr = String(e.old_string ?? '');
         const newStr = String(e.new_string ?? '');
         if (!oldStr) throw new Error('old_string не может быть пустым');
+        if (oldStr === newStr) continue;
         const count = content.split(oldStr).length - 1;
         if (count === 0) {
           throw new Error(`Фрагмент не найден в ${path}. Прочитайте файл заново через read_file и повторите с точным текстом.`);
@@ -833,6 +844,11 @@ async function executeTool(call, { chat, settings, files, model, signal, truncat
         applied.push({ old_string: oldStr.slice(0, 80), occurrences: e.replace_all ? count : 1 });
       }
       if (!edits.length) throw new Error('Нужен хотя бы один элемент в edits');
+      if (!applied.length) {
+        throw new Error(
+          'Все правки пропускают изменение текста. Укажи в new_string другой текст — иначе файл не изменится.',
+        );
+      }
       await store.putFile(chat.id, path, content);
       const bytes = new Blob([content]).size;
       const lines = content.split('\n').length;

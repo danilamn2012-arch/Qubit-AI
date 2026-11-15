@@ -52,19 +52,12 @@ export function openSettings(initialTab = 'provider') {
     subtitle: 'Всё хранится только в этом браузере',
     wide: true,
     className: 'modal--settings',
-    // Крестик убран: закрытие только кнопкой «Закрыть» — так подтверждение
-    // при несохранённых изменениях всегда срабатывает предсказуемо.
-    hideClose: true,
     body: `<div class="settings">
       <nav class="settings__nav" id="setNav" role="tablist"></nav>
       <section class="settings__pane" id="setPane"></section>
     </div>`,
     footer: `<span class="tip" id="saveHint"></span><span class="spacer"></span>
-      <button type="button" class="btn btn--primary" data-save>${icon('check', 15)} Сохранить</button>
-      <button type="button" class="btn btn--icon" data-close title="Закрыть" aria-label="Закрыть">${icon(
-        'close',
-        17,
-      )}</button>`,
+      <button type="button" class="btn btn--primary" data-save>${icon('check', 15)} Сохранить</button>`,
     onBeforeClose: async () => {
       if (!dirty) return true;
       return confirmDialog({

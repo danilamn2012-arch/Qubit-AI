@@ -265,13 +265,20 @@ export async function streamChat(opts) {
     } catch {
       // Некоторые провайдеры отвечают SSE даже без stream: true
       const parsed = collectFromSse(raw);
-      if (parsed.text && onText) onText(parsed.text, parsed.text);
+      let sseText = parsed.text;
+      let sseCalls = parsed.toolCalls;
+      if (sseText) {
+        const dsml = extractDsml(sseText);
+        sseText = dsml.text;
+        if (!sseCalls.length) sseCalls = dsml.calls;
+      }
+      if (sseText && onText) onText(sseText, sseText);
       if (parsed.reasoning && onReasoning) onReasoning(parsed.reasoning, parsed.reasoning);
-      parsed.toolCalls.forEach((c) => onToolCall && onToolCall(c));
+      sseCalls.forEach((c) => onToolCall && onToolCall(c));
       return {
-        text: parsed.text,
+        text: sseText,
         reasoning: parsed.reasoning,
-        toolCalls: parsed.toolCalls,
+        toolCalls: sseCalls,
         finishReason: parsed.finishReason || 'stop',
         truncated: isCut(parsed.finishReason),
         usage: parsed.usage,
@@ -279,12 +286,20 @@ export async function streamChat(opts) {
     }
     const choice = json?.choices?.[0] || {};
     const msg = choice.message || {};
-    if (msg.content && onText) onText(msg.content, msg.content);
-    if (msg.reasoning_content && onReasoning) onReasoning(msg.reasoning_content, msg.reasoning_content);
     const calls = (msg.tool_calls || []).map(normalizeToolCall);
+    // Служебная разметка вместо tool_calls — тоже разбираем, а теги вырезаем
+    // в любом случае.
+    let outText = msg.content || '';
+    if (outText) {
+      const parsed = extractDsml(outText);
+      outText = parsed.text;
+      if (!calls.length) calls.push(...parsed.calls);
+    }
+    if (outText && onText) onText(outText, outText);
+    if (msg.reasoning_content && onReasoning) onReasoning(msg.reasoning_content, msg.reasoning_content);
     calls.forEach((c) => onToolCall && onToolCall(c));
     return {
-      text: msg.content || '',
+      text: outText,
       reasoning: msg.reasoning_content || '',
       toolCalls: calls,
       finishReason: choice.finish_reason || 'stop',
@@ -319,7 +334,7 @@ export async function streamChat(opts) {
     const delta = choice.delta || {};
     if (delta.content) {
       text += delta.content;
-      if (onText) onText(delta.content, text);
+      if (onText) onText(delta.content, stripDsmlLive(text));
     }
     if (delta.reasoning_content) {
       reasoning += delta.reasoning_content;
@@ -377,12 +392,108 @@ export async function streamChat(opts) {
   // 'max_tokens'). Это значит, что аргументы инструмента пришли не целиком.
   const cut = isCut(finishReason);
 
-  return { text, reasoning, toolCalls, finishReason: finishReason || 'stop', truncated: cut, usage };
+  // Модель иногда печатает служебную разметку вызова вместо tool_calls.
+  // Превращаем её в настоящие вызовы, чтобы работа выполнялась, а не висела
+  // текстом в ленте. Разметку вырезаем всегда — даже если вызовы уже пришли
+  // штатно, иначе пользователь снова увидит «странные буквы».
+  let outText = text;
+  let calls = toolCalls;
+  const dsml = extractDsml(text);
+  if (dsml.calls.length) {
+    outText = dsml.text;
+    if (!calls.length) calls = dsml.calls;
+  } else if (DSML_MARK.test(outText)) {
+    outText = dsml.text;
+  }
+
+  return { text: outText, reasoning, toolCalls: calls, finishReason: finishReason || 'stop', truncated: cut, usage };
 }
 
 /** Признак обрыва ответа на лимите длины. */
 function isCut(reason) {
   return reason === 'length' || reason === 'max_tokens';
+}
+
+/**
+ * Служебная разметка DeepSeek, попавшая в обычный текст.
+ *
+ * Иногда модель вместо поля `tool_calls` печатает внутренний формат:
+ *
+ *   <｜｜DSML｜｜ calls>
+ *   <｜｜DSML｜｜ invoke name="edit_file">
+ *   <｜｜DSML｜｜ parameter name="path">index.html</｜｜DSML｜｜ parameter>
+ *   </｜｜DSML｜｜ invoke>
+ *   </｜｜DSML｜｜ calls>
+ *
+ * Пользователь видел это как «странные буквы», а инструмент не выполнялся,
+ * поэтому модель повторяла вызов и упиралась в защиту от циклов. Разбираем
+ * разметку в настоящие вызовы и убираем её из текста ответа.
+ */
+const DSML_MARK = /<[｜|]{1,2}\s*DSML\s*[｜|]{1,2}/i;
+
+function extractDsml(text) {
+  const source = String(text || '');
+  if (!DSML_MARK.test(source)) return { text: source, calls: [] };
+
+  const calls = [];
+  const invokeRe =
+    /<[｜|]+\s*DSML\s*[｜|]+\s*invoke\s+name\s*=\s*"([^"]+)"[^>]*>([\s\S]*?)<\/[｜|]+\s*DSML\s*[｜|]+\s*invoke\s*>/gi;
+  let m;
+  while ((m = invokeRe.exec(source))) {
+    const name = m[1];
+    const body = m[2];
+    const args = {};
+    const paramRe =
+      /<[｜|]+\s*DSML\s*[｜|]+\s*parameter\s+name\s*=\s*"([^"]+)"[^>]*>([\s\S]*?)<\/[｜|]+\s*DSML\s*[｜|]+\s*parameter\s*>/gi;
+    let p;
+    while ((p = paramRe.exec(body))) {
+      const key = p[1];
+      const raw = p[2];
+      // Значение может быть строкой (path) или готовым JSON (edits).
+      let value = raw;
+      const trimmed = raw.trim();
+      if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+        try {
+          value = JSON.parse(trimmed);
+        } catch {
+          value = raw;
+        }
+      }
+      args[key] = value;
+    }
+    if (name) calls.push({ id: 'call_' + Math.random().toString(36).slice(2, 8), name, args, truncatedArgs: false });
+  }
+
+  // Вырезаем разметку: сначала блок целиком, затем остатки отдельных тегов.
+  let cleaned = source.replace(
+    /<[｜|]+\s*DSML[\s\S]*?<\/[｜|]+\s*DSML\s*[｜|]+\s*calls\s*>/gi,
+    '',
+  );
+  if (!cleaned.trim()) {
+    cleaned = source.replace(/<[｜|]+\s*DSML[\s\S]*$/i, '');
+  }
+  cleaned = cleaned
+    .split('\n')
+    .filter((line) => !DSML_MARK.test(line))
+    .join('\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+
+  return { text: cleaned, calls };
+}
+
+/**
+ * Живой текст без служебной разметки.
+ *
+ * Разбор идёт по мере стрима: незакрытый блок DSML обрезается до конца, чтобы
+ * пользователь не видел теги, пока ответ ещё печатается.
+ */
+function stripDsmlLive(text) {
+  const source = String(text || '');
+  if (!DSML_MARK.test(source)) return source;
+  const cleaned = source.replace(/<[｜|]+\s*DSML[\s\S]*?<\/[｜|]+\s*DSML\s*[｜|]+\s*calls\s*>/gi, '');
+  const openAt = cleaned.search(/<[｜|]+\s*DSML/i);
+  return (openAt >= 0 ? cleaned.slice(0, openAt) : cleaned).trimEnd();
 }
 
 /**

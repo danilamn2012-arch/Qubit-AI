@@ -219,6 +219,10 @@ async function runAgentTurn(chat, model, signal) {
             setLive({
               tools: ((state.live && state.live.tools) || []).map((t) => {
                 if (t.call !== call) return t;
+                // Повтор — не поломка: показываем нейтрально, как в готовой ленте.
+                if (result && result.repeated && !result.toolError) {
+                  return { call, card: renderToolChip({ name: call.name, args: call.args }, result) };
+                }
                 // Результат может прийти с полем error (например, лимит поисков
                 // или таймаут). Раньше такая плашка выглядела как успешная.
                 if (phase === 'error' || (result && result.error)) {

@@ -145,6 +145,14 @@ export function renderToolChip(tool, result) {
   const detail = tool.args?.path || tool.args?.query || '';
 
   // Ошибка инструмента должна быть видна в ленте и после завершения хода.
+  // Повтор того же вызова — не поломка, а защита от цикла: показываем его
+  // нейтральной плашкой, иначе лента заканчивалась пугающим красным блоком.
+  if (result && result.repeated && !result.toolError) {
+    return `<div class="msg__note" style="padding:8px 11px">
+      ${icon('info', 14)}
+      <span><b style="font-weight:600">Шаг пропущен</b>${detail ? ` · <span class="mono">${escapeHtml(String(detail)).slice(0, 90)}</span>` : ''} — этот вызов уже выполнялся с теми же аргументами</span>
+    </div>`;
+  }
   if (result && result.error) {
     return `<div class="alert">${icon('info', 14)} <span>${escapeHtml(String(result.error)).slice(0, 300)}</span></div>`;
   }
