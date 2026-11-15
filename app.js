@@ -13,6 +13,7 @@ import { openSettings } from './settings.js';
 import { openFilesModal, renderFileCard, renderToolChip } from './files.js';
 import { toast, confirmDialog, closeTopModal, hasModal } from './modals.js';
 import { closePreview, previewOpen } from './preview.js';
+import { providerForModel } from './providers.js';
 
 /* ------------------------------ Старт ---------------------------------- */
 
@@ -40,6 +41,12 @@ async function boot() {
   window.__qb = { state, bus, store, runTurn };
   watchSystemTheme();
 
+  // Приглашение по ссылке: показываем окно подтверждения. Обрабатываем после
+  // отрисовки, чтобы модалка встала поверх готового интерфейса.
+  import('./invite-ui.js')
+    .then(({ handleInviteFromUrl }) => handleInviteFromUrl())
+    .catch((err) => console.warn('[qubit] Приглашение не обработано', err));
+
   const bootEl = document.getElementById('boot');
   if (bootEl) {
     bootEl.style.transition = 'opacity 220ms ease';
@@ -56,9 +63,16 @@ async function boot() {
     try {
       sessionStorage.setItem('qubit.onboarded', '1');
     } catch {}
+    // Если модели уже загружены, но все выключены — ведём сразу к их включению.
+    const hasAny = (state.settings.models || []).some((m) => m.id);
     setTimeout(() => {
-      toast('Подключите API и добавьте модель — иначе отправлять некуда.', 'info');
-      openSettings('provider');
+      toast(
+        hasAny
+          ? 'Все модели выключены — включите нужные, чтобы начать чат.'
+          : 'Подключите API и добавьте модель — иначе отправлять некуда.',
+        'info',
+      );
+      openSettings(hasAny ? 'models' : 'provider');
     }, 500);
   }
 
@@ -118,6 +132,12 @@ function newChatAndFocus() {
 
 /* ----------------------------- Отправка -------------------------------- */
 
+/** У модели есть провайдер с адресом API — можно отправлять запрос. */
+function currentProviderReady() {
+  const provider = providerForModel(state.settings, currentModel());
+  return !!(provider && provider.baseUrl);
+}
+
 async function send() {
   if (state.busy) return;
   const { promptEl } = await import('./chat.js');
@@ -126,13 +146,19 @@ async function send() {
 
   const model = currentModel();
   if (!model || !model.id) {
-    toast('Сначала добавьте модель в настройках', 'error');
+    const hasAny = (state.settings.models || []).some((m) => m.id);
+    toast(hasAny ? 'Все модели выключены — включите нужную' : 'Сначала добавьте модель в настройках', 'error');
     openSettings('models');
     return;
   }
 
-  if (!state.settings.provider.baseUrl) {
-    toast('Укажите URL API в настройках', 'error');
+  if (!state.settings.providers || !state.settings.providers.length) {
+    toast('Добавьте провайдера в настройках', 'error');
+    openSettings('provider');
+    return;
+  }
+  if (!currentProviderReady()) {
+    toast('У выбранной модели нет адреса API — проверьте подключение', 'error');
     openSettings('provider');
     return;
   }
@@ -146,6 +172,9 @@ async function send() {
   }
 
   chat.modelId = chat.modelId || model.id;
+  // Если модель чата выключили, чат должен перейти на выбранную в интерфейсе,
+  // иначе в историю попадёт ссылка на выключенную модель.
+  if (chat.modelId !== model.id) chat.modelId = model.id;
   const userMsg = {
     id: 'm-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 6),
     role: 'user',
@@ -330,7 +359,8 @@ async function regenerate(messageId) {
 
   const model = currentModel();
   if (!model || !model.id) {
-    toast('Сначала добавьте модель в настройках', 'error');
+    const hasAny = (state.settings.models || []).some((m) => m.id);
+    toast(hasAny ? 'Все модели выключены — включите нужную' : 'Сначала добавьте модель в настройках', 'error');
     openSettings('models');
     return;
   }
@@ -373,7 +403,8 @@ async function compactNow() {
   }
   const model = currentModel();
   if (!model || !model.id) {
-    toast('Сначала добавьте модель в настройках', 'error');
+    const hasAny = (state.settings.models || []).some((m) => m.id);
+    toast(hasAny ? 'Все модели выключены — включите нужную' : 'Сначала добавьте модель в настройках', 'error');
     openSettings('models');
     return;
   }

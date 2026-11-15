@@ -3,10 +3,29 @@
  * расчёт токенов и сжатие контекста.
  */
 
-import { streamChat, buildNativeBody } from './api.js';
+import { streamChat, buildNativeBody, parseExtraHeaders } from './api.js';
+import { providerForModel } from './providers.js';
 import { SYSTEM_PROMPT, MAX_SEARCHES_PER_TURN, SEARCH_TIMEOUT, COMPACT_KEEP_LAST, nowContext, effortsOf, DEFAULT_MAX_STEPS, DEFAULT_TEMPERATURE, DEFAULT_MAX_TOKENS } from './config.js';
 import * as store from './storage.js';
 import { estimateTokens, messageTokens, historyTokens, costOf, effectiveContext } from './pricing.js';
+
+/**
+ * Параметры подключения для модели.
+ *
+ * Модели бывают от разных провайдеров, поэтому адрес и ключ берутся из
+ * провайдера самой модели, а не из единственных настроек. Если провайдер не
+ * найден, возвращаем пустое подключение: `streamChat` выдаст понятную ошибку
+ * вместо запроса на чужой сервер.
+ */
+function connectionFor(settings, model) {
+  const provider = providerForModel(settings, model);
+  return {
+    baseUrl: (provider && provider.baseUrl) || '',
+    apiKey: (provider && provider.apiKey) || '',
+    extraHeaders: parseExtraHeaders((provider && provider.extraHeaders) || ''),
+    stream: !provider || provider.stream !== false,
+  };
+}
 
 /* ----------------------------- Инструменты ----------------------------- */
 
@@ -258,11 +277,11 @@ ${summary ? `Предыдущая сводка:\n${summary}\n\n` : ''}Фрагм
 ${transcript}`;
 
   try {
-    const { parseExtraHeaders } = await import('./api.js');
+    const conn = connectionFor(settings, model);
     const res = await streamChat({
-      baseUrl: settings.provider.baseUrl,
-      apiKey: settings.provider.apiKey,
-      extraHeaders: parseExtraHeaders(settings.provider.extraHeaders),
+      baseUrl: conn.baseUrl,
+      apiKey: conn.apiKey,
+      extraHeaders: conn.extraHeaders,
       model: model.id,
       messages: [
         { role: 'system', content: 'Ты аккуратно сжимаешь технические диалоги, ничего не выдумывая.' },
@@ -270,7 +289,7 @@ ${transcript}`;
       ],
       temperature: 0.2,
       maxTokens: 900,
-      stream: settings.provider.stream !== false,
+      stream: conn.stream,
       signal,
     });
     newSummary = (res.text || '').trim();
@@ -342,7 +361,7 @@ export async function runTurn(ctx) {
   // Он не зависит от источника web_search — можно выключить Википедию и
   // оставить поиск OpenRouter.
   const nativeMode = settings.search?.native || 'auto';
-  const nativeBody = !chatSearchAllowed || nativeMode === 'off' ? null : buildNativeBody(settings);
+  const nativeBody = !chatSearchAllowed || nativeMode === 'off' ? null : buildNativeBody(settings, providerForModel(settings, model));
 
   // Инструмент поиска нужен, только если встроенного поиска нет: иначе модель
   // искала бы дважды — сама и через инструмент.
@@ -437,17 +456,18 @@ export async function runTurn(ctx) {
     let assistantReasoning = '';
     let toolCalls = [];
 
+    const conn = connectionFor(settings, model);
     const res = await streamChat({
-      baseUrl: settings.provider.baseUrl,
-      apiKey: settings.provider.apiKey,
-      extraHeaders: (await import('./api.js')).parseExtraHeaders(settings.provider.extraHeaders),
+      baseUrl: conn.baseUrl,
+      apiKey: conn.apiKey,
+      extraHeaders: conn.extraHeaders,
       model: model.id,
       messages,
       tools: toolDefs,
       temperature: Number(settings.temperature ?? DEFAULT_TEMPERATURE),
       maxTokens: Number(settings.maxTokens) || DEFAULT_MAX_TOKENS,
       reasoningEffort,
-      stream: settings.provider.stream !== false,
+      stream: conn.stream,
       bodyExtra: nativeBody,
       signal,
       onText: (delta, full) => {

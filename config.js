@@ -5,7 +5,7 @@
 
 export const APP = {
   name: 'Qubit AI',
-  version: '1.3.4',
+  version: '1.4.0',
   storageKey: 'qubit.settings.v1',
 };
 
@@ -196,14 +196,29 @@ export function prettyModelName(id) {
 
 export const DEFAULT_MODELS = [];
 
+/**
+ * Провайдер по умолчанию.
+ *
+ * Раньше подключение было одно (`settings.provider`). Теперь их список: у
+ * каждого свой адрес, ключ, заголовки и модели. Запись ниже нужна, чтобы у
+ * нового пользователя было куда вписать ключ.
+ */
+export const DEFAULT_PROVIDER = {
+  id: 'prov-default',
+  name: 'DeepSeek',
+  preset: 'deepseek',
+  baseUrl: 'https://api.deepseek.com/v1',
+  apiKey: '',
+  extraHeaders: '',
+  stream: true,
+  enabled: true,
+  /** true — добавлен по ссылке-приглашению: набор моделей ограничен. */
+  restricted: false,
+};
+
 export const DEFAULT_SETTINGS = {
-  provider: {
-    preset: 'deepseek',
-    baseUrl: 'https://api.deepseek.com/v1',
-    apiKey: '',
-    extraHeaders: '',
-    stream: true,
-  },
+  providers: [{ ...DEFAULT_PROVIDER }],
+  activeProviderId: DEFAULT_PROVIDER.id,
   /** Поиск в интернете: 'off' | 'wikipedia' | 'custom'. */
   search: {
     mode: 'wikipedia',

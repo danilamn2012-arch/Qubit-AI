@@ -4,8 +4,9 @@
 
 import { icon } from './icons.js';
 import { md, escapeHtml } from './markdown.js';
-import { state, bus, currentModel, currentEffort, getModel, contextInfo, sessionStats, setModel, setEffort } from './state.js';
+import { state, bus, currentModel, currentEffort, getModel, enabledModels, contextInfo, sessionStats, setModel, setEffort } from './state.js';
 import { SUGGESTIONS, effortsOf, effortLabel } from './config.js';
+import { providerForModel, providerLabel, modelKey, splitModelKey } from './providers.js';
 import { formatRub, formatNumber, formatCompact } from './pricing.js';
 import { renderFileCard, renderToolChip, openFileViewer, isPreviewable } from './files.js';
 import { openPreview } from './preview.js';
@@ -121,6 +122,8 @@ export function initChat({ onSend, onStop, onRegenerate }) {
     refreshModelButton();
     refreshHeader();
     refreshComposerMeta();
+    // В пустом чате название модели выводится в подсказке — её тоже обновляем.
+    if (!state.busy && (!state.chat || !state.chat.messages.length)) renderChat();
   });
   bus.on('effort:changed', () => {
     refreshHeader();
@@ -130,6 +133,9 @@ export function initChat({ onSend, onStop, onRegenerate }) {
     refreshModelButton();
     refreshComposerMeta();
     refreshHeader();
+    // Пустой экран показывает подсказку о подключении и название модели —
+    // после добавления провайдера по ссылке он должен обновиться.
+    if (!state.busy && (!state.chat || !state.chat.messages.length)) renderChat();
   });
   bus.on('settings:saved', () => {
     refreshModelButton();
@@ -217,21 +223,30 @@ export function renderChat() {
 function emptyState() {
   const model = currentModel();
   const noModel = !model.id;
+  // Модели могут быть, но все выключены — это другой совет, чем «подключите API».
+  const hasAnyModel = (state.settings.models || []).some((m) => m.id);
+  const allOff = noModel && hasAnyModel;
   return `<div class="empty">
     <h1>Что создаём сегодня?</h1>
     <p>${
-      noModel
-        ? 'Осталось подключить модель: выберите провайдера в настройках, вставьте ключ и загрузите список моделей. Это займёт минуту.'
-        : 'Опишите задачу — модель напишет файл в виртуальном проекте. Код можно открыть, скопировать, скачать или сразу посмотреть в предпросмотре.'
+      allOff
+        ? 'Все модели выключены. Откройте настройки и включите хотя бы одну — после этого можно писать в чат.'
+        : noModel
+          ? 'Осталось подключить модель: выберите провайдера в настройках, вставьте ключ и загрузите список моделей. Это займёт минуту.'
+          : 'Опишите задачу — модель напишет файл в виртуальном проекте. Код можно открыть, скопировать, скачать или сразу посмотреть в предпросмотре.'
     }</p>
     ${
       noModel
         ? `<div class="empty__setup">
-            <button type="button" class="btn btn--primary" data-empty-settings>${icon(
-              'link',
+            <button type="button" class="btn btn--primary" data-empty-settings="${allOff ? 'models' : 'provider'}">${icon(
+              allOff ? 'cpu' : 'link',
               15,
-            )} Подключить API</button>
-            <span class="tip">Поддерживается любой OpenAI-совместимый API: DeepSeek, OpenRouter, OpenAI, Groq, свой сервер.</span>
+            )} ${allOff ? 'Включить модель' : 'Подключить API'}</button>
+            <span class="tip">${
+              allOff
+                ? 'Выключенные модели не показываются в выборе — их нужно включить тумблером.'
+                : 'Поддерживается любой OpenAI-совместимый API: DeepSeek, OpenRouter, OpenAI, Groq, свой сервер.'
+            }</span>
           </div>`
         : `<div class="suggestions" id="suggestions">
       ${SUGGESTIONS.map(
@@ -253,7 +268,7 @@ function emptyState() {
 function bindEmpty() {
   const setup = document.querySelector('[data-empty-settings]');
   if (setup) {
-    setup.addEventListener('click', () => bus.emit('open-settings', 'provider'));
+    setup.addEventListener('click', () => bus.emit('open-settings', setup.dataset.emptySettings || 'provider'));
     return;
   }
   const box = document.getElementById('suggestions');
@@ -595,7 +610,11 @@ export function refreshHeader() {
       (chat && chat.searchOff) || !state.settings.search || state.settings.search.mode === 'off';
     // Уровень усилий — в подписи шапки, только если модель его объявила.
     const effort = currentEffort();
-    title.querySelector('span').textContent = `${model.name}${
+    // Провайдера показываем, только когда подключений несколько: иначе это шум.
+    const provider = providerForModel(state.settings, model);
+    const providerPart =
+      (state.settings.providers || []).length > 1 && provider ? ` · ${providerLabel(provider)}` : '';
+    title.querySelector('span').textContent = `${model.name}${providerPart}${
       effort ? ` · усилия: ${effortLabel(effort).toLowerCase()}` : ''
     }${
       filesCount ? ` · ${filesCount} ${filesCount === 1 ? 'файл' : filesCount < 5 ? 'файла' : 'файлов'}` : ''
@@ -697,9 +716,15 @@ export function showContextDetails() {
 function openModelPicker(anchor) {
   closeMenu();
   const model = currentModel();
-  const models = state.settings.models || [];
+  // В выборе участвуют только включённые модели: выключенные остаются в
+  // настройках. Так у шлюза с сотнями моделей список в чате остаётся коротким.
+  const models = enabledModels();
   const effort = currentEffort();
   const allowedEfforts = effortsOf(model);
+  // Раскрытая модель и строка поиска. Перерисовываем только список внутри
+  // поповера, чтобы не потерять позицию и не мигать целиком.
+  let openId = '';
+  let query = '';
 
   const pop = document.createElement('div');
   pop.className = 'popover popover--model';
@@ -708,47 +733,15 @@ function openModelPicker(anchor) {
       'settings',
       13,
     )} Настроить</button></div>
-    <div class="model-list">
-      ${
-        models.length
-          ? models
-              .map((m) => {
-                const specs = [
-                  `<span class="model-spec" title="Контекстное окно">${formatCompact(m.context)} контекст</span>`,
-                  `<span class="model-spec" title="Поддерживаемый вход">вход: ${(m.input || ['text'])
-                    .map((x) => MOD_LABEL[x] || x)
-                    .join(', ')}</span>`,
-                  `<span class="model-spec" title="Поддерживаемый выход">выход: ${(m.output || ['text'])
-                    .map((x) => MOD_LABEL[x] || x)
-                    .join(', ')}</span>`,
-                  `<span class="model-spec" title="Инструменты">${
-                    m.tools === false ? 'без инструментов' : 'инструменты'
-                  }</span>`,
-                ].join('');
-                return `<button type="button" class="model-opt${m.id === model.id ? ' is-active' : ''}" data-model="${escapeHtml(
-                  m.id,
-                )}">
-            <span class="model-opt__check">${m.id === model.id ? icon('check', 15) : ''}</span>
-            <span class="model-opt__body">
-              <span class="model-opt__title">${escapeHtml(m.name)}${
-                  m.tools === false ? '<span class="badge">без инструментов</span>' : ''
-                }</span>
-              ${m.note ? `<span class="model-opt__note">${escapeHtml(m.note)}</span>` : ''}
-              <span class="model-specs">${specs}</span>
-            </span>
-          </button>`;
-              })
-              .join('')
-          : `<div class="model-list__empty">
-              <strong>Моделей пока нет</strong>
-              <span>Подключите провайдера и загрузите список моделей — они появятся здесь.</span>
-              <button type="button" class="btn btn--sm btn--primary" data-open-settings>${icon(
-                'plus',
-                14,
-              )} Добавить модель</button>
-            </div>`
-      }
-    </div>
+    ${
+      models.length > 1
+        ? `<div class="model-search model-search--pop">
+            ${icon('search', 14)}
+            <input class="input" type="search" data-picker-search placeholder="Поиск модели" spellcheck="false" autocomplete="off">
+          </div>`
+        : ''
+    }
+    <div class="model-list" data-picker-list></div>
     ${
       allowedEfforts.length
         ? `<div class="popover-head" style="border-top:1px solid var(--border);border-bottom:0;padding:9px 12px 4px"><strong>Усилия</strong><span class="tip">уровни модели</span></div>
@@ -766,6 +759,90 @@ function openModelPicker(anchor) {
     </div>`
         : `<div class="popover-note">Уровни усилий не выбраны: эта модель не объявила их в <code>/models</code>. Задайте их в настройках модели, если провайдер их поддерживает.</div>`
     }`;
+
+  const listEl = pop.querySelector('[data-picker-list]');
+  const searchEl = pop.querySelector('[data-picker-search]');
+
+  // Короткая подпись под именем: только главное. Полные характеристики — по клику.
+  const specsOf = (m) => {
+    const provider = providerForModel(state.settings, m);
+    return [
+      state.settings.providers && state.settings.providers.length > 1 ? providerLabel(provider) : '',
+      m.context ? `${formatCompact(m.context)} контекст` : '',
+      m.tools === false ? 'без инструментов' : '',
+    ]
+      .filter(Boolean)
+      .join(' · ');
+  };
+
+  const renderList = () => {
+    const q = query.trim().toLowerCase();
+    const visible = models.filter((m) => !q || `${m.name} ${m.id}`.toLowerCase().includes(q));
+    if (!visible.length) {
+      listEl.innerHTML = models.length
+        ? `<div class="model-empty-note">Ничего не нашлось.</div>`
+        : `<div class="model-list__empty">
+            <strong>Нет включённых моделей</strong>
+            <span>Модели есть в настройках, но выключены. Включите нужные — они появятся здесь.</span>
+            <button type="button" class="btn btn--sm btn--primary" data-open-settings>${icon(
+              'settings',
+              14,
+            )} Открыть модели</button>
+          </div>`;
+      return;
+    }
+
+    listEl.innerHTML = visible
+      .map((m) => {
+        const key = modelKey(m);
+        const active = m.id === model.id && (!m.providerId || m.providerId === (model.providerId || m.providerId));
+        const expanded = openId === key;
+        return `<div class="model-opt${active ? ' is-active' : ''}${expanded ? ' is-open' : ''}" data-model="${escapeHtml(
+          key,
+        )}" role="button" tabindex="0">
+          <span class="model-opt__check">${active ? icon('check', 15) : ''}</span>
+          <span class="model-opt__body">
+            <span class="model-opt__title">${escapeHtml(m.name)}</span>
+            ${
+              expanded
+                ? `${
+                    // У подключения, полученного по ссылке, ID не показываем:
+                    // отправитель делится только названиями моделей.
+                    providerForModel(state.settings, m)?.restricted
+                      ? ''
+                      : `<span class="model-opt__id">${escapeHtml(m.id)}</span>`
+                  }<span class="model-specs">${[
+                    `<span class="model-spec">${formatCompact(m.context)} контекст</span>`,
+                    `<span class="model-spec">вход: ${(m.input || ['text'])
+                      .map((x) => MOD_LABEL[x] || x)
+                      .join(', ')}</span>`,
+                    `<span class="model-spec">выход: ${(m.output || ['text'])
+                      .map((x) => MOD_LABEL[x] || x)
+                      .join(', ')}</span>`,
+                    m.tools === false ? '<span class="model-spec">без инструментов</span>' : '',
+                    effortsOf(m).length
+                      ? `<span class="model-spec">усилия: ${escapeHtml(effortsOf(m).join(', '))}</span>`
+                      : '',
+                    Number(m.priceIn) || Number(m.priceOut)
+                      ? `<span class="model-spec">${Number(m.priceIn) || 0} / ${Number(m.priceOut) || 0} ₽ за 1M</span>`
+                      : '',
+                  ]
+                    .filter(Boolean)
+                    .join('')}</span>${
+                    m.note ? `<span class="model-opt__note">${escapeHtml(m.note)}</span>` : ''
+                  }<span class="model-opt__pick" data-pick="${escapeHtml(key)}"><span class="btn btn--sm btn--primary">${
+                    active ? 'Выбрана' : 'Выбрать'
+                  }</span></span>`
+                : `<span class="model-opt__sub">${escapeHtml(specsOf(m))}</span>`
+            }
+          </span>
+          <span class="model-opt__chevron">${icon(expanded ? 'chevronDown' : 'chevronRight', 14)}</span>
+        </div>`;
+      })
+      .join('');
+  };
+
+  renderList();
 
   document.body.appendChild(pop);
   const r = anchor.getBoundingClientRect();
@@ -785,12 +862,31 @@ function openModelPicker(anchor) {
     hint.textContent = effortLabel(currentEffort());
   };
   setHint();
+
+  if (searchEl) {
+    searchEl.addEventListener('input', () => {
+      query = searchEl.value;
+      renderList();
+    });
+  }
+
   pop.addEventListener('click', (e) => {
+    // Кнопка «Выбрать» в раскрытой карточке.
+    const pick = e.target.closest('[data-pick]');
+    if (pick) {
+      setModel(pick.dataset.pick);
+      pop.remove();
+      toast(`Модель: ${getModel(splitModelKey(pick.dataset.pick).id).name}`);
+      return;
+    }
     const m = e.target.closest('[data-model]');
     if (m) {
-      setModel(m.dataset.model);
-      pop.remove();
-      toast(`Модель: ${getModel(m.dataset.model).name}`);
+      const key = m.dataset.model;
+      // Клик по строке раскрывает характеристики, а выбирается модель кнопкой
+      // «Выбрать» в раскрытой карточке. Так список остаётся компактным, а
+      // данные видны без перехода в настройки.
+      openId = openId === key ? '' : key;
+      renderList();
       return;
     }
     const ef = e.target.closest('[data-effort]');
@@ -803,6 +899,15 @@ function openModelPicker(anchor) {
     if (e.target.closest('[data-open-settings]')) {
       pop.remove();
       bus.emit('open-settings', 'models');
+    }
+  });
+
+  pop.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ' ') {
+      const m = e.target.closest('[data-model]');
+      if (!m) return;
+      e.preventDefault();
+      m.click();
     }
   });
 

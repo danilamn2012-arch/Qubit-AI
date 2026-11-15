@@ -2,7 +2,7 @@
    Стратегия: network-first для навигации, cache-first для статики.
    При обновлении версии кеш сбрасывается. */
 
-const VERSION = 'qubit-v12';
+const VERSION = 'qubit-v15';
 const ASSETS = [
   './agent.js',
   './api.js',
@@ -14,12 +14,15 @@ const ASSETS = [
   './files.js',
   './icons.js',
   './index.html',
+  './invite-ui.js',
+  './invite.js',
   './manifest.webmanifest',
   './markdown.css',
   './markdown.js',
   './modals.js',
   './preview.js',
   './pricing.js',
+  './providers.js',
   './settings.js',
   './shell.js',
   './state.js',

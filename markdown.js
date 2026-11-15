@@ -271,15 +271,76 @@ function codeBlock(lang, code, closed) {
 
 const LIST_RE = /^(\s*)([-*+]|\d{1,3}[.)])\s+(.*)$/;
 
+/** Начало другого блока: список на нём должен закончиться, а не «съесть» его. */
+function isBlockStart(line) {
+  return (
+    /^\s*(`{3,}|~{3,})/.test(line) ||
+    /^#{1,6}\s+/.test(line) ||
+    /^\s*>\s?/.test(line) ||
+    /^\s*([-*_])\s*\1\s*\1[\s*_]*$/.test(line)
+  );
+}
+
+/**
+ * Строка — начало нового блока, а не продолжение пункта.
+ *
+ * По правилам Markdown продолжение пункта должно быть с отступом, но модели
+ * часто жмут текст без отступа. Если считать любую такую строку продолжением,
+ * заголовки («Часть 2: Etiquette») приклеиваются к последнему пункту, а итог
+ * после списка становится частью последнего элемента.
+ *
+ * Компромисс: продолжением считаем строку, которая начинается со строчной
+ * буквы или знака — так пишут обычный перенос. Строка с заглавной буквы после
+ * законченного пункта — новый блок.
+ */
+/**
+ * Строка — подпись или итог после списка: «Итого: 2 дела», «Всего 3 пункта».
+ * Их модели пишут без пустой строки, и они приклеивались к последнему пункту.
+ *
+ * `\b` здесь не годится: в JavaScript он считается по ASCII и с кириллицей
+ * не срабатывает, поэтому проверяем разделитель явно.
+ */
+const SUMMARY_RE = /^(итог|итого|всего|в сумме|примечание|итоги|результат|note)(\s|:|$)/i;
+
+function startsNewBlock(s, prevTail, next) {
+  if (!s) return false;
+  if (SUMMARY_RE.test(s)) return true;
+  // Фраза оборвана — это перенос мысли, а не новый блок.
+  if (/[,;:—–\-«"(\[]$/.test(prevTail)) return false;
+  // Заголовок перед списком — точно новый блок.
+  if (looksLikeHeading(s, next)) return true;
+  // С заглавной после законченного предложения — новый абзац.
+  return /[.!?]$/.test(prevTail) && /^[«"(\[А-ЯЁA-Z0-9]/.test(s) && s.length <= 80;
+}
+
+/**
+ * Строка — заголовок раздела, а не продолжение пункта.
+ *
+ * Модель часто разделяет части ответа строкой «Часть 2: Etiquette» или
+ * «**Часть 2: Etiquette**». По правилам Markdown строка без отступа после
+ * пункта — его продолжение, поэтому заголовок приклеивался к пункту 4, а
+ * следующий список начинался заново. Это и выглядело как сломанное
+ * форматирование.
+ */
+function looksLikeHeading(line, next) {
+  const s = String(line || '').trim();
+  if (!s || s.length > 60) return false;
+  if (!next || !LIST_RE.test(next)) return false;
+  if (/[.,!?;:]$/.test(s)) return false;
+  if (/\.\s/.test(s)) return false;
+  return /^(\*\*[^*]+\*\*|[А-ЯЁA-Z0-9])/.test(s);
+}
+
 function parseList(lines, start, baseIndent, ordered) {
   const items = [];
   let i = start;
   while (i < lines.length) {
     const line = lines[i];
     if (!line.trim()) {
-      // Пустая строка: продолжение списка, только если следующая строка — элемент
+      // Пустая строка продолжает список, только если дальше снова элемент того
+      // же уровня. Иначе это новый абзац — список закончился.
       const next = lines[i + 1];
-      if (next && LIST_RE.test(next) && (next.match(/^(\s*)/)[1].length >= baseIndent || true)) {
+      if (next && LIST_RE.test(next) && next.match(/^(\s*)/)[1].length >= baseIndent) {
         i++;
         continue;
       }
@@ -287,9 +348,17 @@ function parseList(lines, start, baseIndent, ordered) {
     }
     const m = line.match(LIST_RE);
     if (!m) {
-      // Продолжение текущего элемента (вложенный текст)
-      if (items.length && line.startsWith(' '.repeat(baseIndent + 2))) {
-        items[items.length - 1].extra.push(line.slice(baseIndent + 2));
+      // Перенос строки внутри пункта. Модели часто жмут текст без отступа, и
+      // раньше из-за этого список рвался, а продолжение становилось отдельным
+      // абзацем. Но и склеивать всё подряд нельзя: заголовок «Часть 2» и итог
+      // после списка должны остаться отдельными блоками.
+      if (isBlockStart(line)) break;
+      if (line.includes('|') && i + 1 < lines.length && isTableDivider(lines[i + 1])) break;
+      const prev = items[items.length - 1];
+      const prevTail = prev ? `${prev.text} ${prev.extra.join(' ')}`.trim() : '';
+      if (items.length && startsNewBlock(line.trim(), prevTail, lines[i + 1])) break;
+      if (items.length) {
+        items[items.length - 1].extra.push(line.trim());
         i++;
         continue;
       }
@@ -322,7 +391,9 @@ function parseList(lines, start, baseIndent, ordered) {
       body = tm ? tm[2] : body;
     }
     let inner = inline(body);
-    if (it.extra.length) inner += (inner ? '<br>' : '') + inline(it.extra.join(' '));
+    // Мягкий перенос строки в Markdown — это пробел, а не жёсткий <br>.
+    // Иначе ответ с переносами выглядел рубленым.
+    if (it.extra.length) inner += (inner ? ' ' : '') + inline(it.extra.join(' '));
     if (isTasks) {
       inner = `<span>${inner}</span>${it.children.join('')}`;
       html += `<li data-task=""><span class="task-box${task ? ' is-done' : ''}">${task ? '✓' : ''}</span>${inner}</li>`;

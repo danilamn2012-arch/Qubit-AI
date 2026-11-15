@@ -6,6 +6,7 @@
 import * as store from './storage.js';
 import { effectiveContext, historyTokens, costOf } from './pricing.js';
 import { effortsOf } from './config.js';
+import { providerForModel, isProviderEnabled, providersOf, providerById, modelKey, splitModelKey } from './providers.js';
 
 /* ------------------------------- События ------------------------------- */
 
@@ -63,31 +64,107 @@ export const NO_MODEL = {
   note: 'Добавьте модель в настройках',
 };
 
-export function getModel(id) {
-  const list = state.settings.models || [];
-  const wanted = id || state.settings.activeModelId;
-  return list.find((m) => m.id === wanted) || list[0] || NO_MODEL;
+/**
+ * Включена ли модель.
+ *
+ * У шлюзов вроде OpenRouter в одном API сотни моделей. При импорте они
+ * добавляются выключенными: иначе список в чате превращался в свалку.
+ * Старые записи без поля `enabled` считаем включёнными — иначе после
+ * обновления у пользователя пропали бы все модели.
+ */
+export function isModelEnabled(model) {
+  return !!model && model.enabled !== false;
 }
 
-/** Есть ли хоть одна рабочая модель (с непустым ID). */
+/** Модели, которые показываются в чате: с ID, включённые и у включённого провайдера. */
+export function enabledModels(list) {
+  const src = Array.isArray(list) ? list : state.settings.models || [];
+  return src.filter((m) => m.id && isModelEnabled(m) && providerUsable(state.settings, m));
+}
+
+/** Доступен ли провайдер модели: он существует и включён. */
+export function providerUsable(settings, model) {
+  const provider = providerForModel(settings, model);
+  return !!provider && isProviderEnabled(provider);
+}
+
+/**
+ * Модель по ID. Ищем и среди выключенных: старые сообщения должны сохранять
+ * название модели, даже если её потом отключили.
+ *
+ * `providerId` уточняет поиск: одинаковый ID бывает у разных провайдеров.
+ */
+export function getModel(id, providerId) {
+  const list = state.settings.models || [];
+  const wanted = id || state.settings.activeModelId;
+  const pid = providerId || (id ? '' : state.settings.activeProviderId);
+  const found = pid
+    ? list.find((m) => m.id === wanted && (m.providerId || pid) === pid)
+    : list.find((m) => m.id === wanted);
+  if (found) return found;
+  if (wanted) {
+    const loose = list.find((m) => m.id === wanted);
+    if (loose) return loose;
+  }
+  return list.find((m) => m.id && isModelEnabled(m)) || list[0] || NO_MODEL;
+}
+
+/**
+ * Модель по ключу «провайдер::id».
+ *
+ * Один и тот же ID бывает у разных провайдеров, поэтому выбор в интерфейсе
+ * хранит ключ, а не голый id.
+ */
+export function getModelByKey(key) {
+  const { providerId, id } = splitModelKey(key);
+  const list = state.settings.models || [];
+  const found = list.find((m) => m.id === id && (!providerId || (m.providerId || providerId) === providerId));
+  return found || getModel(id);
+}
+
+/** Ключ модели для интерфейса. */
+export function keyOf(model) {
+  return modelKey(model);
+}
+
+/** Есть ли хоть одна включённая модель с ID. */
 export function hasModel() {
-  return (state.settings.models || []).some((m) => m.id);
+  return (state.settings.models || []).some((m) => m.id && isModelEnabled(m) && providerUsable(state.settings, m));
 }
 
 export function currentModel() {
   const id = (state.chat && state.chat.modelId) || state.settings.activeModelId;
-  return getModel(id);
+  const pid = state.chat && state.chat.modelId ? state.chat.modelProviderId : state.settings.activeProviderId;
+  const model = getModel(id, pid);
+  // В API нельзя отправить выключенную модель: если старая модель в чате
+  // отключена (или выключен её провайдер), берём первую доступную.
+  if (model.id && (!isModelEnabled(model) || !providerUsable(state.settings, model))) {
+    return (state.settings.models || []).find((m) => m.id && isModelEnabled(m) && providerUsable(state.settings, m)) || NO_MODEL;
+  }
+  return model;
 }
 
-export function setModel(id) {
+export function setModel(key) {
   if (state.busy) return;
+  // Ключ может быть «провайдер::id»: один и тот же ID бывает у разных
+  // провайдеров, и выбрать нужно именно нужную запись.
+  const { providerId, id } = splitModelKey(key);
+  const target = (state.settings.models || []).find(
+    (m) => m.id === id && (!providerId || (m.providerId || providerId) === providerId),
+  );
+  // Выключенную модель выбрать нельзя: в чате показываются только включённые.
+  if (target && !isModelEnabled(target)) return;
   // Модель запоминается в чате, чтобы старые диалоги не меняли поведение
   if (state.chat) {
     state.chat.modelId = id;
+    state.chat.modelProviderId = providerId || (target && target.providerId) || '';
     scheduleSave();
   }
-  persistSettings({ activeModelId: id });
-  bus.emit('model:changed', getModel(id));
+  persistSettings({
+    activeModelId: id,
+    activeProviderId: providerId || (target && target.providerId) || state.settings.activeProviderId,
+  });
+  bus.emit('model:changed', target || getModel(id));
 }
 
 /**
@@ -113,6 +190,76 @@ export function setEffort(id) {
   }
   persistSettings({ effort: id });
   bus.emit('effort:changed', id);
+}
+
+/* ----------------------------- Провайдеры ------------------------------- */
+
+/** Провайдер, к которому относится текущая модель. */
+export function currentProvider() {
+  return providerForModel(state.settings, currentModel());
+}
+
+export function providerList() {
+  return providersOf(state.settings);
+}
+
+/**
+ * Добавляет провайдера и его модели.
+ *
+ * Используется и ручным добавлением, и ссылкой-приглашением. Возвращает
+ * созданного провайдера: вызывающий код показывает его в интерфейсе.
+ */
+export function addProvider(provider, models = []) {
+  const list = providerList().slice();
+  const entry = {
+    stream: true,
+    enabled: true,
+    restricted: false,
+    name: 'Провайдер',
+    ...provider,
+  };
+  list.push(entry);
+  const nextModels = (state.settings.models || []).filter(
+    (m) => !(m.providerId === entry.id && models.some((x) => x.id === m.id)),
+  );
+  models.forEach((m) => nextModels.push({ enabled: true, tools: true, input: ['text'], output: ['text'], ...m, providerId: entry.id }));
+  persistSettings({ providers: list, models: nextModels });
+  return entry;
+}
+
+export function updateProvider(id, patch) {
+  const list = providerList().map((p) => (p.id === id ? { ...p, ...patch } : p));
+  persistSettings({ providers: list });
+}
+
+/**
+ * Удаляет провайдера вместе с его моделями.
+ *
+ * Чаты, где эти модели использовались, не трогаем: `currentModel` сам перейдёт
+ * на доступную модель, а старые сообщения сохранят название.
+ */
+export function removeProvider(id) {
+  const providers = providerList().filter((p) => p.id !== id);
+  const models = (state.settings.models || []).filter((m) => m.providerId !== id);
+  persistSettings({ providers, models });
+  const active = state.settings.activeModelId;
+  if (!models.some((m) => m.id === active && m.enabled !== false)) {
+    state.settings.activeModelId = models.find((m) => m.id && m.enabled !== false)?.id || '';
+    store.saveSettings(state.settings);
+  }
+  if (!providers.some((p) => p.id === state.settings.activeProviderId)) {
+    state.settings.activeProviderId = providers[0]?.id || '';
+    store.saveSettings(state.settings);
+  }
+  bus.emit('settings:changed', state.settings);
+}
+
+/** Включает или выключает провайдера: его модели пропадают из чата. */
+export function setProviderEnabled(id, enabled) {
+  updateProvider(id, { enabled: !!enabled });
+  const active = currentModel();
+  if (active.id) persistSettings({ activeModelId: active.id });
+  bus.emit('model:changed', active);
 }
 
 export function applyTheme(theme) {

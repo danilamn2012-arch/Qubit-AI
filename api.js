@@ -26,7 +26,7 @@ export function looksLikeBadUrl(baseUrl) {
  * Собирает поля встроенного поиска из настроек.
  * Возвращает null, если поиск выключен или провайдер неизвестен.
  */
-export function buildNativeBody(settings) {
+export function buildNativeBody(settings, provider) {
   const s = (settings && settings.search) || {};
   const mode = s.native || 'auto';
   if (mode === 'off') return null;
@@ -38,7 +38,9 @@ export function buildNativeBody(settings) {
       return null;
     }
   }
-  return nativeSearchBody(mode, settings?.provider?.baseUrl);
+  // Адрес берём у провайдера модели: у разных подключений он разный.
+  const baseUrl = provider ? provider.baseUrl : settings?.provider?.baseUrl;
+  return nativeSearchBody(mode, baseUrl);
 }
 
 function joinUrl(base, path) {
