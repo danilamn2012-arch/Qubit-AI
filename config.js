@@ -5,12 +5,58 @@
 
 export const APP = {
   name: 'Qubit AI',
-  version: '1.2.2',
+  version: '1.3.0',
   storageKey: 'qubit.settings.v1',
 };
 
-/** Максимум шагов агента за один запрос пользователя. */
-export const MAX_TOOL_ROUNDS = 16;
+/**
+ * Подписи уровней усилий, которые присылает провайдер.
+ *
+ * Своих значений мы больше не выдумываем: набор приходит из `/models`
+ * (или задаётся вручную для модели). Если провайдер ничего не сообщил,
+ * выбора усилий в интерфейсе нет вовсе.
+ */
+export const EFFORT_LABELS = {
+  none: 'Без рассуждений',
+  minimal: 'Минимальные',
+  low: 'Низкие',
+  medium: 'Средние',
+  high: 'Высокие',
+  xhigh: 'Очень высокие',
+  max: 'Максимальные',
+};
+
+/** Красивая подпись уровня усилий; неизвестное значение — как есть. */
+export function effortLabel(id) {
+  return EFFORT_LABELS[id] || String(id || '');
+}
+
+/**
+ * Уровни усилий, которые поддерживает конкретная модель.
+ *
+ * Список живёт в настройках модели: он приходит из `/models` (если шлюз его
+ * отдаёт) или вписывается вручную. Пустой список — выбора усилий нет вовсе,
+ * и `reasoning_effort` в запрос не попадает.
+ */
+export function effortsOf(model) {
+  const raw = model && model.efforts;
+  if (!raw) return [];
+  const arr = Array.isArray(raw) ? raw : String(raw).split(/[,;\s]+/);
+  return [...new Set(arr.map((s) => String(s).trim()).filter(Boolean))];
+}
+
+/**
+ * Параметры запроса по умолчанию.
+ *
+ * Раньше температура и `max_tokens` зависели от «усилий»: переключение уровня
+ * незаметно меняло длину ответа, и файл обрывался. Теперь это независимые
+ * значения, а неподдерживаемые поля API отбрасывает сам (см. api.js).
+ */
+export const DEFAULT_TEMPERATURE = 0.4;
+export const DEFAULT_MAX_TOKENS = 32000;
+
+/** Сколько шагов агента разрешено за один ответ пользователя. */
+export const DEFAULT_MAX_STEPS = 40;
 
 /** Сколько поисковых запросов модель может сделать за один ход (по умолчанию). */
 export const MAX_SEARCHES_PER_TURN = 4;
@@ -26,21 +72,6 @@ export const CONTEXT_RESERVE = 1800;
 
 /** Сколько последних сообщений не сжимать. */
 export const COMPACT_KEEP_LAST = 6;
-
-export const EFFORTS = [
-  { id: 'off', label: 'Без рассуждений', hint: 'Быстро, минимум размышлений' },
-  { id: 'low', label: 'Низкие', hint: 'Короткая цепочка мыслей' },
-  { id: 'medium', label: 'Средние', hint: 'Баланс скорости и качества' },
-  { id: 'high', label: 'Высокие', hint: 'Максимум качества, дороже' },
-];
-
-/** Соответствие «усилий» параметрам запроса. */
-export const EFFORT_PARAMS = {
-  off: { reasoning_effort: null, temperature: 0.7, maxTokens: 4096 },
-  low: { reasoning_effort: 'low', temperature: 0.5, maxTokens: 6144 },
-  medium: { reasoning_effort: 'medium', temperature: 0.4, maxTokens: 8192 },
-  high: { reasoning_effort: 'high', temperature: 0.3, maxTokens: 12000 },
-};
 
 /** Возможные модальности модели. */
 export const MODALITIES = {
@@ -195,7 +226,11 @@ export const DEFAULT_SETTINGS = {
   },
   models: DEFAULT_MODELS,
   activeModelId: '',
-  effort: 'medium',
+  /** Сколько шагов агента разрешено за один ответ. */
+  maxSteps: DEFAULT_MAX_STEPS,
+  /** Потолок длины одного ответа модели. */
+  maxTokens: DEFAULT_MAX_TOKENS,
+  temperature: DEFAULT_TEMPERATURE,
   theme: 'auto',
   fontScale: 1,
   compactThreshold: 0.8,
@@ -218,6 +253,7 @@ export const SYSTEM_PROMPT = `Ты — Qubit AI, агент внутри веб-
 - Не создавай посторонние файлы: никаких test.txt, temp.js и «проверок». В проекте должны оставаться только нужные для задачи файлы.
 - Если файл уже существует и нужно что-то поменять — используй edit_file с точными фрагментами. Не переписывай весь файл через write_file, если меняется небольшая часть.
 - Большой файл может не уместиться в один вызов. Тогда собирай его по частям: write_file с началом, затем append_file с продолжением. Не переписывай файл целиком, чтобы «дописать» кусок.
+- Если в результате write_file или append_file пришло "partial: true" — файл сохранён не целиком, ответ оборвался. Продолжай с места обрыва через append_file, пока не допишешь остаток.
 - Инструменты write_file, edit_file и append_file возвращают только путь, размер и число строк — содержимое модель обратно не получает. Не пытайся угадать текст файла: прочитай его через read_file, если правка требует точного фрагмента.
 - Не читай один и тот же файл повторно без изменений: результат уже есть в истории. После успешной правки перечитывать файл не нужно.
 - Перед правкой незнакомого файла прочитай его через read_file (можно частями: offset/limit).

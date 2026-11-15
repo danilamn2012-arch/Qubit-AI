@@ -9,7 +9,7 @@ import { state, bus, persistSettings, applyTheme, applyScale } from './state.js'
 import * as store from './storage.js';
 import { testConnection, parseExtraHeaders } from './api.js';
 import { formatNumber } from './pricing.js';
-import { MODALITIES, PROVIDERS, guessContext, prettyModelName } from './config.js';
+import { MODALITIES, PROVIDERS, guessContext, prettyModelName, effortsOf, DEFAULT_MAX_STEPS, DEFAULT_MAX_TOKENS } from './config.js';
 
 const TABS = [
   { id: 'provider', label: 'Подключение', icon: 'link' },
@@ -185,20 +185,29 @@ export function openSettings(initialTab = 'provider') {
           return;
         }
 
-        const added = importModels(list);
-        status.textContent = `Успешно. Доступно моделей: ${list.length}${
-          added ? `, добавлено: ${added}` : ', новых нет'
-        }`;
+        const res = importModels(list);
+        const withEfforts = list.filter((m) => m.efforts && m.efforts.length).length;
+        const parts = [`Доступно моделей: ${list.length}`];
+        if (res.added) parts.push(`добавлено: ${res.added}`);
+        if (res.updated) parts.push(`обновлено: ${res.updated}`);
+        if (!res.added && !res.updated) parts.push('новых нет');
+        if (withEfforts) parts.push(`с уровнями усилий: ${withEfforts}`);
+        status.textContent = `Успешно. ${parts.join(', ')}`;
         status.style.color = 'var(--success)';
 
         const datalist = pane.querySelector('#modelsDatalist');
         if (datalist) {
           datalist.innerHTML = list
             .slice(0, 300)
-            .map((m) => `<option value="${escapeAttr(m)}"></option>`)
+            .map((m) => `<option value="${escapeAttr(m.id)}"></option>`)
             .join('');
         }
-        toast(added ? `Импортировано моделей: ${added}` : 'Список моделей уже актуален', 'ok');
+        toast(
+          res.added || res.updated
+            ? `Модели обновлены: добавлено ${res.added}, обновлено ${res.updated}`
+            : 'Список моделей уже актуален',
+          'ok',
+        );
       } catch (err) {
         status.textContent = err.message || 'Ошибка подключения';
         status.style.color = 'var(--danger)';
@@ -214,18 +223,45 @@ export function openSettings(initialTab = 'provider') {
 
   /**
    * Добавляет модели провайдера в черновик настроек.
-   * Контекст угадывается по ID, цены остаются нулевыми — их не узнать из /models.
+   *
+   * Всё, что шлюз сообщил о модели (контекст, уровни рассуждений, инструменты),
+   * берём оттуда. Чего не сообщил — остаётся пустым: угаданные уровни усилий
+   * приводили к полям, которых провайдер не знает.
+   *
+   * Уже добавленные модели тоже обновляем: иначе после обновления приложения
+   * уровни усилий не появились бы без удаления модели.
    */
-  function importModels(ids) {
+  function importModels(list) {
     let added = 0;
+    let updated = 0;
     const firstNew = [];
-    ids.forEach((id) => {
-      if (!id || (draft.models || []).some((m) => m.id === id)) return;
+    list.forEach((info) => {
+      const id = typeof info === 'string' ? info : info.id;
+      if (!id) return;
+      const efforts = (typeof info === 'object' && info.efforts) || [];
+      const context = (typeof info === 'object' && info.context) || 0;
+
+      const existing = (draft.models || []).find((m) => m.id === id);
+      if (existing) {
+        let touched = false;
+        if (efforts.length && effortsOf(existing).join(',') !== efforts.join(',')) {
+          existing.efforts = efforts;
+          touched = true;
+        }
+        if (context && Number(existing.context) !== context) {
+          existing.context = context;
+          touched = true;
+        }
+        if (touched) updated++;
+        return;
+      }
+
       draft.models.push({
         id,
         name: prettyModelName(id),
-        context: guessContext(id),
+        context: context || guessContext(id),
         tools: !/embed|whisper|tts|dall|moderation/i.test(id),
+        efforts,
         input: /vision|vl|claude|gpt-4|gemini|qwen.*vl/i.test(id) ? ['text', 'image'] : ['text'],
         output: ['text'],
         priceIn: 0,
@@ -238,8 +274,8 @@ export function openSettings(initialTab = 'provider') {
     if (!draft.models.some((m) => m.id === draft.activeModelId)) {
       draft.activeModelId = firstNew[0] || draft.models.find((m) => m.id)?.id || '';
     }
-    if (added) hintDirty();
-    return added;
+    if (added || updated) hintDirty();
+    return { added, updated };
   }
 
   /* -------------------------------- Модели ------------------------------ */
@@ -313,7 +349,12 @@ export function openSettings(initialTab = 'provider') {
         const m = draft.models[idx];
         if (!m) return;
         if (field === 'tools') m.tools = input.checked;
-        else if (field === 'context' || field === 'priceIn' || field === 'priceOut') m[field] = Number(input.value) || 0;
+        else if (field === 'efforts') {
+          m.efforts = String(input.value || '')
+            .split(/[,;\s]+/)
+            .map((s) => s.trim())
+            .filter(Boolean);
+        } else if (field === 'context' || field === 'priceIn' || field === 'priceOut') m[field] = Number(input.value) || 0;
         else m[field] = input.value;
         hintDirty();
       });
@@ -643,6 +684,13 @@ function modelRow(m, i) {
         m.note || '',
       )}" placeholder="Короткое описание">
     </div>
+    <div class="field" style="margin-top:10px">
+      <label>Уровни усилий от провайдера</label>
+      <input class="input mono" data-model-field="efforts" data-model-row="${i}" spellcheck="false"
+        value="${escapeAttr(effortsOf(m).join(', '))}"
+        placeholder="не заданы — выбора не будет">
+      <span class="hint">Через запятую, ровно как называет провайдер: например <code>low, medium, high</code>. Пустое поле — усилия не выбираются и <code>reasoning_effort</code> в запрос не уходит. У OpenRouter список приходит из <code>/models</code> автоматически.</span>
+    </div>
   </div>`;
 }
 
@@ -669,6 +717,22 @@ function paneContext(d) {
         <label for="contextCap">Свой лимит контекста, токенов</label>
         <input class="input" id="contextCap" type="number" min="0" step="1000" data-bind="contextCap" value="${d.contextCap}">
         <span class="hint">0 — использовать лимит модели${model ? ` (${formatNumber(model.context)})` : ''}.</span>
+      </div>
+    </div>
+    <div class="form-row">
+      <div class="field">
+        <label for="maxSteps">Шагов агента за один ответ</label>
+        <input class="input" id="maxSteps" type="number" min="4" max="200" step="1" data-bind="maxSteps" value="${
+          d.maxSteps ?? DEFAULT_MAX_STEPS
+        }">
+        <span class="hint">Сколько раз модель может вызвать инструменты, прежде чем ход завершится. Длинная задача требует больше шагов: 16 не хватало даже на таймер.</span>
+      </div>
+      <div class="field">
+        <label for="maxTokens">Лимит вывода, токенов</label>
+        <input class="input" id="maxTokens" type="number" min="2048" step="1000" data-bind="maxTokens" value="${
+          d.maxTokens ?? DEFAULT_MAX_TOKENS
+        }">
+        <span class="hint">Потолок длины одного ответа. Слишком маленький обрывает большие файлы.</span>
       </div>
     </div>
     <div class="settings-block">

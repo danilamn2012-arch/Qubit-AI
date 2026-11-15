@@ -177,7 +177,7 @@ export async function streamChat(opts) {
     temperature,
   };
   if (maxTokens) body.max_tokens = maxTokens;
-  if (reasoningEffort) body.reasoning_effort = reasoningEffort;
+  if (reasoningEffort) Object.assign(body, reasoningBody(baseUrl, reasoningEffort));
   if (tools && tools.length) {
     body.tools = tools;
     body.tool_choice = 'auto';
@@ -207,9 +207,40 @@ export async function streamChat(opts) {
   let res;
   try {
     res = await attempt(extra ? mergeBody(body, extra) : body);
+
+    // Провайдер может не понять добавку (встроенный поиск). Повторяем без неё.
     if (!res.ok && extra && res.status >= 400 && res.status < 500 && res.status !== 401 && res.status !== 403) {
       await res.text().catch(() => '');
       res = await attempt(body);
+    }
+
+    // Или не принять слишком большой max_tokens: у DeepSeek потолок 8К.
+    // Уменьшаем вдвое, пока не станет приемлемо, — но не больше трёх попыток.
+    let limit = body.max_tokens || 0;
+    for (let tries = 0; !res.ok && limit > 2048 && tries < 3; tries++) {
+      if (res.status !== 400 && res.status !== 422) break;
+      const text = await res.text().catch(() => '');
+      if (!/max_tokens|max_completion_tokens|too large|maximum/i.test(text)) {
+        // Не про лимит — отдаём как есть, чтобы показать настоящую ошибку.
+        res = new Response(text, { status: res.status, headers: res.headers });
+        break;
+      }
+      limit = Math.max(2048, Math.floor(limit / 2));
+      res = await attempt({ ...(extra ? mergeBody(body, extra) : body), max_tokens: limit });
+    }
+
+    // Уровень рассуждений — необязательное поле и не всем шлюзам знакомо.
+    // Если именно из-за него отказ, повторяем без него: работа важнее настройки.
+    const hasReasoning = !!(body.reasoning_effort || body.reasoning);
+    if (!res.ok && (res.status === 400 || res.status === 422) && hasReasoning) {
+      const text = await res.text().catch(() => '');
+      if (/reasoning|unsupported|unknown|unrecognized/i.test(text)) {
+        const { reasoning_effort, reasoning, ...rest } = body;
+        res = await attempt(extra ? mergeBody(rest, extra) : rest);
+        if (!res.ok) res = new Response(await res.text().catch(() => ''), { status: res.status, headers: res.headers });
+      } else {
+        res = new Response(text, { status: res.status, headers: res.headers });
+      }
     }
   } catch (err) {
     if (err.name === 'AbortError') throw err;
@@ -242,6 +273,7 @@ export async function streamChat(opts) {
         reasoning: parsed.reasoning,
         toolCalls: parsed.toolCalls,
         finishReason: parsed.finishReason || 'stop',
+        truncated: isCut(parsed.finishReason),
         usage: parsed.usage,
       };
     }
@@ -256,6 +288,7 @@ export async function streamChat(opts) {
       reasoning: msg.reasoning_content || '',
       toolCalls: calls,
       finishReason: choice.finish_reason || 'stop',
+      truncated: isCut(choice.finish_reason),
       usage: normalizeUsage(json.usage),
       raw: json,
     };
@@ -331,16 +364,41 @@ export async function streamChat(opts) {
       return true;
     })
     .map((c) => {
-      let args = {};
-      try {
-        args = c.args ? JSON.parse(c.args) : {};
-      } catch {
-        args = { __raw: c.args };
-      }
-      return { id: c.id || 'call_' + Math.random().toString(36).slice(2, 8), name: c.name, args };
+      const parsed = parseArgs(c.args);
+      return {
+        id: c.id || 'call_' + Math.random().toString(36).slice(2, 8),
+        name: c.name,
+        args: parsed.args,
+        truncatedArgs: parsed.truncated,
+      };
     });
 
-  return { text, reasoning, toolCalls, finishReason: finishReason || 'stop', usage };
+  // Ответ оборван на лимите: провайдер ставит finish_reason 'length' (или
+  // 'max_tokens'). Это значит, что аргументы инструмента пришли не целиком.
+  const cut = isCut(finishReason);
+
+  return { text, reasoning, toolCalls, finishReason: finishReason || 'stop', truncated: cut, usage };
+}
+
+/** Признак обрыва ответа на лимите длины. */
+function isCut(reason) {
+  return reason === 'length' || reason === 'max_tokens';
+}
+
+/**
+ * Поля тела для выбранного уровня рассуждений.
+ *
+ * Провайдеры называют это по-разному: OpenRouter понимает
+ * `reasoning: { effort: 'high' }`, а большинство OpenAI-совместимых шлюзов —
+ * `reasoning_effort: 'high'`. Раньше мы всегда слали второе, и OpenRouter
+ * отвечал 400 на незнакомое поле. Значение берётся из списка модели, поэтому
+ * сюда попадает только то, что провайдер действительно объявил.
+ */
+function reasoningBody(baseUrl, effort) {
+  if (/openrouter\.ai/i.test(String(baseUrl || ''))) {
+    return { reasoning: { effort } };
+  }
+  return { reasoning_effort: effort };
 }
 
 /**
@@ -348,6 +406,101 @@ export async function streamChat(opts) {
  * в каждом чанке. Простое сложение давало «web_searchweb_search», модель
  * получала неизвестный инструмент и зацикливалась на повторных вызовах.
  */
+/**
+ * Разбирает аргументы вызова инструмента, спасая обрезанный ответ.
+ *
+ * Провайдер обрывает генерацию на `max_tokens` прямо посреди JSON. Раньше
+ * получался `{ __raw: ... }`, инструмент вызывался без обязательных полей
+ * («Параметр content обязателен»), и модель шла по кругу. Теперь частичный
+ * JSON достраивается, а факт обрезки помечается флагом.
+ */
+function parseArgs(raw) {
+  const text = String(raw == null ? '' : raw);
+  if (!text.trim()) return { args: {}, truncated: false };
+
+  try {
+    return { args: JSON.parse(text), truncated: false };
+  } catch {
+    // Ниже пробуем восстановить.
+  }
+
+  const salvaged = salvageJson(text);
+  if (salvaged) return { args: salvaged, truncated: true };
+  return { args: { __raw: text.slice(0, 2000) }, truncated: true };
+}
+
+/**
+ * Достраивает обрезанный JSON: закрывает строку и незакрытые скобки.
+ *
+ * Сначала пробуем самый вероятный случай — обрыв внутри строкового значения
+ * (`{"path":"a","content":"…`): хватает закрыть кавычку и `}`. Если не вышло,
+ * откатываемся к последней запятой вне строки и закрываем уже оттуда.
+ */
+function salvageJson(text) {
+  const attempt = (cut) => {
+    let s = text.slice(0, cut);
+    // Незакрытая строка? Считаем кавычки с учётом экранирования.
+    let inString = false;
+    let escaped = false;
+    const stack = [];
+    for (const ch of s) {
+      if (escaped) {
+        escaped = false;
+        continue;
+      }
+      if (ch === '\\') {
+        escaped = true;
+        continue;
+      }
+      if (ch === '"') {
+        inString = !inString;
+        continue;
+      }
+      if (inString) continue;
+      if (ch === '{' || ch === '[') stack.push(ch);
+      else if (ch === '}' || ch === ']') stack.pop();
+    }
+    if (inString) s += '"';
+    s = s.replace(/[,\s]+$/, '');
+    for (let i = stack.length - 1; i >= 0; i--) s += stack[i] === '{' ? '}' : ']';
+    try {
+      const parsed = JSON.parse(s);
+      return parsed && typeof parsed === 'object' ? parsed : null;
+    } catch {
+      return null;
+    }
+  };
+
+  const direct = attempt(text.length);
+  if (direct) return direct;
+
+  // Откат к запятым вне строк, от конца к началу — не больше 50 попыток.
+  const cuts = [];
+  let inString = false;
+  let escaped = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (ch === '\\') {
+      escaped = true;
+      continue;
+    }
+    if (ch === '"') {
+      inString = !inString;
+      continue;
+    }
+    if (!inString && ch === ',') cuts.push(i);
+  }
+  for (let k = cuts.length - 1, tries = 0; k >= 0 && tries < 50; k--, tries++) {
+    const restored = attempt(cuts[k]);
+    if (restored) return restored;
+  }
+  return null;
+}
+
 function mergeFragment(acc, next) {
   if (!acc) return next;
   if (acc === next) return acc;
@@ -365,13 +518,16 @@ function mergeArgs(acc, next) {
 }
 
 function normalizeToolCall(tc) {
-  let args = {};
-  try {
-    args = typeof tc.function?.arguments === 'string' ? JSON.parse(tc.function.arguments) : tc.function?.arguments || {};
-  } catch {
-    args = { __raw: tc.function?.arguments };
-  }
-  return { id: tc.id || 'call_' + Math.random().toString(36).slice(2, 8), name: tc.function?.name || '', args };
+  const parsed =
+    typeof tc.function?.arguments === 'string'
+      ? parseArgs(tc.function.arguments)
+      : { args: tc.function?.arguments || {}, truncated: false };
+  return {
+    id: tc.id || 'call_' + Math.random().toString(36).slice(2, 8),
+    name: tc.function?.name || '',
+    args: parsed.args,
+    truncatedArgs: parsed.truncated,
+  };
 }
 
 /** На случай, если сервер прислал SSE вместо обычного JSON. */
@@ -412,13 +568,13 @@ function collectFromSse(raw) {
   const toolCalls = [...acc.values()]
     .filter((c) => c.name)
     .map((c) => {
-      let args = {};
-      try {
-        args = c.args ? JSON.parse(c.args) : {};
-      } catch {
-        args = { __raw: c.args };
-      }
-      return { id: c.id || 'call_' + Math.random().toString(36).slice(2, 8), name: c.name, args };
+      const parsed = parseArgs(c.args);
+      return {
+        id: c.id || 'call_' + Math.random().toString(36).slice(2, 8),
+        name: c.name,
+        args: parsed.args,
+        truncatedArgs: parsed.truncated,
+      };
     });
   return { text, reasoning, toolCalls, finishReason, usage };
 }
@@ -434,7 +590,7 @@ function normalizeUsage(u) {
   };
 }
 
-/** Проверка соединения: запрашивает список моделей. */
+/** Проверка соединения: запрашивает список моделей с их возможностями. */
 export async function testConnection({ baseUrl, apiKey, extraHeaders }) {
   if (!baseUrl) throw new ApiError('Не указан URL API', 0);
   const url = joinUrl(baseUrl, '/models');
@@ -452,5 +608,31 @@ export async function testConnection({ baseUrl, apiKey, extraHeaders }) {
   }
   if (!res.ok) throw new ApiError(describeError(res.status, await res.text().catch(() => '')), res.status);
   const json = await res.json();
-  return (json.data || json.models || []).map((m) => m.id || m.name).filter(Boolean);
+  const rows = json.data || json.models || [];
+  return rows
+    .map((m) => (typeof m === 'string' ? { id: m } : m))
+    .filter((m) => m && (m.id || m.name))
+    .map((m) => ({
+      id: m.id || m.name,
+      context: Number(m.context_length || m.context || 0) || 0,
+      // Уровни рассуждений — только те, что реально объявил шлюз.
+      efforts: readEfforts(m),
+      supportsTools: Array.isArray(m.supported_parameters) ? m.supported_parameters.includes('tools') : null,
+    }));
+}
+
+/**
+ * Достаёт объявленные уровни рассуждений из записи `/models`.
+ *
+ * Форматов несколько: OpenRouter отдаёт `reasoning.supported_efforts`, часть
+ * шлюзов — `reasoning.efforts`, кто-то только `supported_parameters`. Ничего
+ * не выдумываем: нет данных — пустой список, и выбора усилий не будет.
+ */
+function readEfforts(m) {
+  const r = m.reasoning;
+  if (!r || typeof r !== 'object') return [];
+  const raw = r.supported_efforts || r.efforts || r.supported_effort_levels || null;
+  if (Array.isArray(raw)) return raw.map(String).filter(Boolean);
+  if (typeof raw === 'string') return raw.split(/[,;\s]+/).filter(Boolean);
+  return [];
 }

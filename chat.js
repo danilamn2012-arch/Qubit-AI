@@ -5,7 +5,7 @@
 import { icon } from './icons.js';
 import { md, escapeHtml } from './markdown.js';
 import { state, bus, currentModel, currentEffort, getModel, contextInfo, sessionStats, setModel, setEffort } from './state.js';
-import { EFFORTS, SUGGESTIONS } from './config.js';
+import { SUGGESTIONS, effortsOf, effortLabel } from './config.js';
 import { formatRub, formatNumber, formatCompact } from './pricing.js';
 import { renderFileCard, renderToolChip, openFileViewer, isPreviewable } from './files.js';
 import { openPreview } from './preview.js';
@@ -119,6 +119,10 @@ export function initChat({ onSend, onStop, onRegenerate }) {
   });
   bus.on('model:changed', () => {
     refreshModelButton();
+    refreshHeader();
+    refreshComposerMeta();
+  });
+  bus.on('effort:changed', () => {
     refreshHeader();
     refreshComposerMeta();
   });
@@ -589,7 +593,11 @@ export function refreshHeader() {
     const filesCount = state.files.length;
     const searchOff =
       (chat && chat.searchOff) || !state.settings.search || state.settings.search.mode === 'off';
+    // Уровень усилий — в подписи шапки, только если модель его объявила.
+    const effort = currentEffort();
     title.querySelector('span').textContent = `${model.name}${
+      effort ? ` · усилия: ${effortLabel(effort).toLowerCase()}` : ''
+    }${
       filesCount ? ` · ${filesCount} ${filesCount === 1 ? 'файл' : filesCount < 5 ? 'файла' : 'файлов'}` : ''
     }${searchOff ? ' · без поиска' : ''}`;
   }
@@ -691,6 +699,7 @@ function openModelPicker(anchor) {
   const model = currentModel();
   const models = state.settings.models || [];
   const effort = currentEffort();
+  const allowedEfforts = effortsOf(model);
 
   const pop = document.createElement('div');
   pop.className = 'popover popover--model';
@@ -740,17 +749,23 @@ function openModelPicker(anchor) {
             </div>`
       }
     </div>
-    <div class="popover-head" style="border-top:1px solid var(--border);border-bottom:0;padding:9px 12px 4px"><strong>Усилия</strong><span class="tip" data-effort-hint></span></div>
+    ${
+      allowedEfforts.length
+        ? `<div class="popover-head" style="border-top:1px solid var(--border);border-bottom:0;padding:9px 12px 4px"><strong>Усилия</strong><span class="tip">уровни модели</span></div>
     <div class="effort-row">
-      ${EFFORTS.map(
-        (e) =>
-          `<button type="button" class="effort-opt${e.id === effort ? ' is-active' : ''}" data-effort="${e.id}" title="${escapeHtml(
-            e.hint,
-          )}">
-            <span class="effort-bars"><i></i><i></i><i></i></span>${escapeHtml(e.label.split(' ')[0])}
-          </button>`,
-      ).join('')}
-    </div>`;
+      ${allowedEfforts
+        .map(
+          (id) =>
+            `<button type="button" class="effort-opt${id === effort ? ' is-active' : ''}" data-effort="${escapeHtml(
+              id,
+            )}" title="${escapeHtml(effortLabel(id))}">
+              <span class="effort-bars"><i></i><i></i><i></i></span>${escapeHtml(effortLabel(id))}
+            </button>`,
+        )
+        .join('')}
+    </div>`
+        : `<div class="popover-note">Уровни усилий не выбраны: эта модель не объявила их в <code>/models</code>. Задайте их в настройках модели, если провайдер их поддерживает.</div>`
+    }`;
 
   document.body.appendChild(pop);
   const r = anchor.getBoundingClientRect();
@@ -766,11 +781,10 @@ function openModelPicker(anchor) {
 
   const hint = pop.querySelector('[data-effort-hint]');
   const setHint = () => {
-    const cur = EFFORTS.find((e) => e.id === currentEffort());
-    hint.textContent = cur ? cur.hint : '';
+    if (!hint || !allowedEfforts.length) return;
+    hint.textContent = effortLabel(currentEffort());
   };
   setHint();
-
   pop.addEventListener('click', (e) => {
     const m = e.target.closest('[data-model]');
     if (m) {

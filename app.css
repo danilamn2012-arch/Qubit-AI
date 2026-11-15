@@ -1111,6 +1111,23 @@
   font-weight: 600;
 }
 
+/* Пояснение вместо выбора: у модели нет объявленных уровней усилий. */
+.popover-note {
+  padding: 10px 12px 12px;
+  font-size: calc(11.5px * var(--scale));
+  line-height: 1.55;
+  color: var(--muted);
+  border-top: 1px solid var(--border);
+}
+
+.popover-note code {
+  font-family: var(--mono);
+  font-size: 0.94em;
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: var(--surface-2);
+}
+
 .model-list {
   max-height: min(60dvh, 440px);
   overflow-y: auto;

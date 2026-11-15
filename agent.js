@@ -4,7 +4,7 @@
  */
 
 import { streamChat, buildNativeBody } from './api.js';
-import { SYSTEM_PROMPT, MAX_TOOL_ROUNDS, MAX_SEARCHES_PER_TURN, SEARCH_TIMEOUT, EFFORT_PARAMS, COMPACT_KEEP_LAST, nowContext } from './config.js';
+import { SYSTEM_PROMPT, MAX_SEARCHES_PER_TURN, SEARCH_TIMEOUT, COMPACT_KEEP_LAST, nowContext, effortsOf, DEFAULT_MAX_STEPS, DEFAULT_TEMPERATURE, DEFAULT_MAX_TOKENS } from './config.js';
 import * as store from './storage.js';
 import { estimateTokens, messageTokens, historyTokens, costOf, effectiveContext } from './pricing.js';
 
@@ -327,7 +327,7 @@ function localSummary(messages, prev) {
  * @param {object} ctx.chat
  * @param {object} ctx.settings
  * @param {object} ctx.model
- * @param {string} ctx.effort
+ * @param {string} [ctx.effort]  уровень рассуждений из списка модели
  * @param {AbortSignal} ctx.signal
  * @param {object} ctx.events  колбэки UI
  */
@@ -355,7 +355,16 @@ export async function runTurn(ctx) {
   // Лимит поисков настраивается: 0 означает «без ограничения» в разумных рамках.
   const maxSearches = Math.max(0, Number(settings.search?.maxPerTurn ?? MAX_SEARCHES_PER_TURN));
 
-  const params = EFFORT_PARAMS[effort] || EFFORT_PARAMS.medium;
+  // Сколько шагов разрешено. Раньше было жёстко 16, и длинная задача обрывалась
+  // на середине с «не удалось довести до конца». Значение берётся из настроек
+  // и ограничено разумным потолком, чтобы модель не крутилась бесконечно.
+  const maxSteps = Math.min(200, Math.max(4, Number(settings.maxSteps) || DEFAULT_MAX_STEPS));
+
+  // Усилия — только из списка модели. Провайдер не объявил уровни? Тогда
+  // `reasoning_effort` не отправляем вовсе: у нас нет права угадывать.
+  const allowedEfforts = effortsOf(model);
+  const reasoningEffort = effort && allowedEfforts.includes(effort) ? effort : null;
+
   const ctxLimit = effectiveContext(model, settings, effort);
   const supportsTools = model.tools !== false;
 
@@ -390,7 +399,7 @@ export async function runTurn(ctx) {
     return msgs.concat(history);
   };
 
-  while (rounds < MAX_TOOL_ROUNDS) {
+  while (rounds < maxSteps) {
     rounds++;
     let messages = buildMessages();
 
@@ -435,9 +444,9 @@ export async function runTurn(ctx) {
       model: model.id,
       messages,
       tools: toolDefs,
-      temperature: params.temperature,
-      maxTokens: params.maxTokens,
-      reasoningEffort: params.reasoning_effort,
+      temperature: Number(settings.temperature ?? DEFAULT_TEMPERATURE),
+      maxTokens: Number(settings.maxTokens) || DEFAULT_MAX_TOKENS,
+      reasoningEffort,
       stream: settings.provider.stream !== false,
       bodyExtra: nativeBody,
       signal,
@@ -453,6 +462,9 @@ export async function runTurn(ctx) {
     assistantText = res.text || assistantText;
     assistantReasoning = res.reasoning || assistantReasoning;
     toolCalls = res.toolCalls || [];
+    // Провайдер обрезал ответ на лимите длины. Аргументы инструмента могли
+    // прийти не целиком — об этом нужно сказать модели понятным текстом.
+    const cutOff = !!res.truncated;
 
     const u = res.usage;
     const roundIn = u ? u.in : used;
@@ -470,6 +482,7 @@ export async function runTurn(ctx) {
       reasoning: assistantReasoning || '',
       toolCalls: toolCalls.map((c) => ({ id: c.id, name: c.name, args: c.args })),
       files: [],
+      cutOff: cutOff || undefined,
       usage: { in: usageTotal.in, out: usageTotal.out, cost: costOf(model, usageTotal.in, usageTotal.out) },
       at: Date.now(),
     };
@@ -480,10 +493,16 @@ export async function runTurn(ctx) {
       break;
     }
 
+    // Ответ обрезан на лимите, но вызов инструмента начался: файл мог
+    // записаться не полностью. Подсказываем модели продолжить с того места.
+    if (cutOff) {
+      onStatus && onStatus('Ответ упёрся в лимит длины — продолжаю частями');
+    }
+
     // Инструменты отключены, а модель всё равно просит вызов: дальше повторять
     // бесполезно. Завершаем ход сводкой о том, что уже сделано.
     if (toolsDisabled) {
-      finalText = assistantText.trim() || summarizeWork(chat);
+      finalText = assistantText.trim() || summarizeWork(chat, maxSteps, 'loop');
       break;
     }
 
@@ -554,7 +573,7 @@ export async function runTurn(ctx) {
             result = { query, results: found };
           }
         } else {
-          result = await executeTool(call, { chat, settings, files, model });
+          result = await executeTool(call, { chat, settings, files, model, truncated: cutOff });
         }
         if (result.files) files = await store.listFiles(chat.id);
         // Запоминаем прочитанное и сбрасываем кеш путей, которые изменились:
@@ -599,7 +618,7 @@ export async function runTurn(ctx) {
   // зациклилась), добавляем понятное сообщение: пустой ответ выглядит как
   // зависший интерфейс. Но сначала пробуем описать уже сделанное.
   if (!finalText.trim() && !(signal && signal.aborted)) {
-    finalText = summarizeWork(chat);
+    finalText = summarizeWork(chat, maxSteps);
     chat.messages.push({
       id: 'm-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 6),
       role: 'assistant',
@@ -686,7 +705,7 @@ function clipResult(result, limit = 12000) {
  * Раньше агент писал «модель слишком долго вызывала инструменты» — это пугало
  * и не объясняло, что осталось рабочим. Здесь перечисляем реально сделанное.
  */
-function summarizeWork(chat) {
+function summarizeWork(chat, maxSteps, reason) {
   const recent = (chat.messages || []).slice(-24);
   const created = [];
   const edited = [];
@@ -700,6 +719,7 @@ function summarizeWork(chat) {
   const uniq = (arr) => [...new Set(arr)];
   const files = uniq([...created, ...edited]);
   const failed = recent.filter((m) => m.role === 'tool' && m.toolResult && m.toolResult.error).length;
+  const steps = Number(maxSteps) || DEFAULT_MAX_STEPS;
 
   const parts = ['Не удалось довести задачу до конца за отведённые шаги.'];
   if (files.length) {
@@ -709,14 +729,22 @@ function summarizeWork(chat) {
     );
   }
   if (failed) parts.push(`\n\nНеудачных вызовов инструментов: ${failed}.`);
-  parts.push('\n\nУточните задачу или попросите продолжить — я доработаю с этого места.');
+  parts.push(
+    reason === 'loop'
+      ? '\n\nДальше пошло повторение одних и тех же вызовов, поэтому шаг остановлен. ' +
+          'Напишите «продолжай» — я не буду повторять уже сделанное.'
+      : `\n\nДостигнут лимит шагов (${steps}). Увеличьте его в настройках — «Контекст и сжатие» — ` +
+          'или попросите продолжить: я доработаю с этого места.',
+  );
   return parts.join('');
 }
 
 /* --------------------------- Выполнение ------------------------------- */
 
-async function executeTool(call, { chat, settings, files, model, signal }) {
+async function executeTool(call, { chat, settings, files, model, signal, truncated }) {
   const args = call.args || {};
+  // Обрыв ответа на лимите длины: аргументы могли прийти не целиком.
+  const cut = !!(truncated || call.truncatedArgs);
   switch (call.name) {
     case 'list_files': {
       const list = await store.listFiles(chat.id);
@@ -749,12 +777,19 @@ async function executeTool(call, { chat, settings, files, model, signal }) {
 
     case 'write_file': {
       const path = normalizePath(args.path);
-      if (typeof args.content !== 'string') throw new Error('Параметр content обязателен');
+      if (typeof args.content !== 'string') {
+        // Самая частая причина — ответ оборвался на max_tokens посреди JSON.
+        const hint = cut
+          ? 'Ответ модели оборвался на лимите длины, поэтому content не пришёл целиком. ' +
+            'Напиши файл частями: сначала write_file с началом (примерно до 300 строк), затем append_file с продолжением.'
+          : 'Параметр content обязателен.';
+        throw new Error(hint);
+      }
       const existed = await store.getFile(chat.id, path);
       await store.putFile(chat.id, path, args.content);
       // Содержимое обратно в историю не отдаём: модель его только что написала
       // сама, а каждый повтор раздувал контекст на размер файла.
-      return {
+      const result = {
         ok: true,
         action: existed ? 'overwritten' : 'created',
         path,
@@ -762,8 +797,18 @@ async function executeTool(call, { chat, settings, files, model, signal }) {
         lines: args.content.split('\n').length,
         file: { path, ext: extOf(path), status: existed ? 'changed' : 'created' },
       };
+      // Обрыв на лимите: сохранено только то, что успело прийти. Молчать нельзя —
+      // модель сочтёт файл готовым и закончит работу с огрызком. Если аргументы
+      // разобрались целиком (truncatedArgs = false), содержимое полное, и
+      // предупреждение было бы ложным.
+      if (call.truncatedArgs) {
+        result.partial = true;
+        result.note =
+          'Ответ оборвался на лимите длины, файл сохранён не целиком. ' +
+          'Продолжи с того места, где оборвался текст, через append_file.';
+      }
+      return result;
     }
-
     case 'edit_file': {
       const path = normalizePath(args.path);
       const rec = await store.getFile(chat.id, path);
@@ -800,14 +845,20 @@ async function executeTool(call, { chat, settings, files, model, signal }) {
 
     case 'append_file': {
       const path = normalizePath(args.path);
-      if (typeof args.content !== 'string') throw new Error('Параметр content обязателен');
+      if (typeof args.content !== 'string') {
+        const hint = cut
+          ? 'Ответ модели оборвался на лимите длины, поэтому content не пришёл целиком. ' +
+            'Дописывай файл меньшими кусками — примерно по 200–300 строк за вызов.'
+          : 'Параметр content обязателен';
+        throw new Error(hint);
+      }
       const rec = await store.getFile(chat.id, path);
       // Если файла ещё нет, append работает как создание: модель часто начинает
       // с дописывания, и падать из-за этого не стоит.
       const base = rec ? rec.content : '';
       const next = base + args.content;
       await store.putFile(chat.id, path, next);
-      return {
+      const result = {
         ok: true,
         action: rec ? 'appended' : 'created',
         path,
@@ -815,6 +866,13 @@ async function executeTool(call, { chat, settings, files, model, signal }) {
         lines: next.split('\n').length,
         file: { path, ext: extOf(path), status: rec ? 'edited' : 'created' },
       };
+      if (call.truncatedArgs) {
+        result.partial = true;
+        result.note =
+          'Ответ оборвался на лимите длины, дописана только часть. ' +
+          'Продолжи с того места, где оборвался текст, ещё одним append_file.';
+      }
+      return result;
     }
 
     case 'delete_file': {

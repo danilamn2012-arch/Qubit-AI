@@ -5,6 +5,7 @@
 
 import * as store from './storage.js';
 import { effectiveContext, historyTokens, costOf } from './pricing.js';
+import { effortsOf } from './config.js';
 
 /* ------------------------------- События ------------------------------- */
 
@@ -89,6 +90,21 @@ export function setModel(id) {
   bus.emit('model:changed', getModel(id));
 }
 
+/**
+ * Текущий уровень рассуждений.
+ *
+ * Значение имеет смысл только если модель его объявила. Если список пуст —
+ * возвращаем null: интерфейс не показывает выбор, а в запрос не уходит
+ * `reasoning_effort`.
+ */
+export function currentEffort() {
+  const model = currentModel();
+  const allowed = effortsOf(model);
+  if (!allowed.length) return null;
+  const wanted = (state.chat && state.chat.effort) || state.settings.effort || '';
+  return allowed.includes(wanted) ? wanted : allowed[0];
+}
+
 export function setEffort(id) {
   if (state.busy) return;
   if (state.chat) {
@@ -97,10 +113,6 @@ export function setEffort(id) {
   }
   persistSettings({ effort: id });
   bus.emit('effort:changed', id);
-}
-
-export function currentEffort() {
-  return (state.chat && state.chat.effort) || state.settings.effort || 'medium';
 }
 
 export function applyTheme(theme) {
