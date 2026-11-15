@@ -787,15 +787,17 @@ async function executeTool(call, { chat, settings, files, model, signal, truncat
       }
       const existed = await store.getFile(chat.id, path);
       await store.putFile(chat.id, path, args.content);
-      // Содержимое обратно в историю не отдаём: модель его только что написала
-      // сама, а каждый повтор раздувал контекст на размер файла.
+      // Размер и число строк кладём и в `file`: карточка в ленте рисуется из
+      // этого объекта, а без них показывала «0 стр.» при каждом обновлении.
+      const bytes = new Blob([args.content]).size;
+      const lines = args.content.split('\n').length;
       const result = {
         ok: true,
         action: existed ? 'overwritten' : 'created',
         path,
-        bytes: new Blob([args.content]).size,
-        lines: args.content.split('\n').length,
-        file: { path, ext: extOf(path), status: existed ? 'changed' : 'created' },
+        bytes,
+        lines,
+        file: { path, ext: extOf(path), status: existed ? 'changed' : 'created', bytes, lines },
       };
       // Обрыв на лимите: сохранено только то, что успело прийти. Молчать нельзя —
       // модель сочтёт файл готовым и закончит работу с огрызком. Если аргументы
@@ -832,14 +834,16 @@ async function executeTool(call, { chat, settings, files, model, signal, truncat
       }
       if (!edits.length) throw new Error('Нужен хотя бы один элемент в edits');
       await store.putFile(chat.id, path, content);
+      const bytes = new Blob([content]).size;
+      const lines = content.split('\n').length;
       return {
         ok: true,
         action: 'edited',
         path,
         applied,
-        bytes: new Blob([content]).size,
-        lines: content.split('\n').length,
-        file: { path, ext: extOf(path), status: 'edited' },
+        bytes,
+        lines,
+        file: { path, ext: extOf(path), status: 'edited', bytes, lines },
       };
     }
 
@@ -858,13 +862,15 @@ async function executeTool(call, { chat, settings, files, model, signal, truncat
       const base = rec ? rec.content : '';
       const next = base + args.content;
       await store.putFile(chat.id, path, next);
+      const bytes = new Blob([next]).size;
+      const lines = next.split('\n').length;
       const result = {
         ok: true,
         action: rec ? 'appended' : 'created',
         path,
-        bytes: new Blob([next]).size,
-        lines: next.split('\n').length,
-        file: { path, ext: extOf(path), status: rec ? 'edited' : 'created' },
+        bytes,
+        lines,
+        file: { path, ext: extOf(path), status: rec ? 'edited' : 'created', bytes, lines },
       };
       if (call.truncatedArgs) {
         result.partial = true;

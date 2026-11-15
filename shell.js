@@ -60,7 +60,6 @@ export function initShell() {
 
   renderChatList();
   bindKeys();
-  updateStorageInfo();
 
   if (state.settings.sidebarCollapsed) el('app').classList.add('sidebar-collapsed');
 }
@@ -390,25 +389,6 @@ function slug(s) {
       .replace(/^-+|-+$/g, '')
       .slice(0, 50) || 'chat'
   );
-}
-
-/* ---------------------------- Место в браузере ------------------------- */
-
-async function updateStorageInfo() {
-  const box = el('storageInfo');
-  if (!box) return;
-  try {
-    const { usageEstimate } = await import('./storage.js');
-    const est = await usageEstimate();
-    if (!est || !est.usage) {
-      box.hidden = true;
-      return;
-    }
-    box.hidden = false;
-    box.innerHTML = `${icon('info', 13)}<span>${(est.usage / 1024 / 1024).toFixed(1).replace('.', ',')} МБ в браузере</span>`;
-  } catch {
-    box.hidden = true;
-  }
 }
 
 function escapeHtml(s) {

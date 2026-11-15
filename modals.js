@@ -78,7 +78,19 @@ export function download(filename, content, mime = 'text/plain;charset=utf-8') {
 
 const openModals = [];
 
-export function openModal({ title, subtitle = '', body, footer = '', wide = false, file = false, onClose, className = '' }) {
+export function openModal({
+  title,
+  subtitle = '',
+  body,
+  footer = '',
+  wide = false,
+  file = false,
+  onClose,
+  className = '',
+  hideClose = false,
+  /** Вызывается перед закрытием. Вернуть false — окно останется открытым. */
+  onBeforeClose,
+}) {
   const root = document.createElement('div');
   root.className = 'modal-root';
   root.innerHTML = `
@@ -90,7 +102,11 @@ export function openModal({ title, subtitle = '', body, footer = '', wide = fals
           <h2></h2>
           ${subtitle ? '<span class="sub"></span>' : ''}
         </div>
-        <button type="button" class="icon-btn" data-close aria-label="Закрыть">${icon('close', 18)}</button>
+        ${
+          hideClose
+            ? ''
+            : `<button type="button" class="icon-btn" data-close aria-label="Закрыть">${icon('close', 18)}</button>`
+        }
       </div>
       <div class="modal__body" data-body></div>
       ${footer ? '<div class="modal__foot" data-foot></div>' : ''}
@@ -112,6 +128,26 @@ export function openModal({ title, subtitle = '', body, footer = '', wide = fals
   document.body.style.overflow = 'hidden';
 
   const prevFocus = document.activeElement;
+
+  // Закрытие может требовать подтверждения (несохранённые настройки). Само
+  // подтверждение — асинхронное, поэтому защищаемся флагом: иначе повторный
+  // Escape или клик по фону открыл бы второй диалог поверх первого.
+  let closing = false;
+  const requestClose = async () => {
+    if (closing) return;
+    if (onBeforeClose) {
+      closing = true;
+      let allowed = false;
+      try {
+        allowed = (await onBeforeClose()) !== false;
+      } finally {
+        closing = false;
+      }
+      if (!allowed) return;
+    }
+    close();
+  };
+
   const close = () => {
     const i = openModals.indexOf(api);
     if (i >= 0) openModals.splice(i, 1);
@@ -120,12 +156,12 @@ export function openModal({ title, subtitle = '', body, footer = '', wide = fals
     if (prevFocus && prevFocus.focus) prevFocus.focus();
     onClose && onClose();
   };
-  const api = { root, body: bodyEl, foot: root.querySelector('[data-foot]'), close };
+  const api = { root, body: bodyEl, foot: root.querySelector('[data-foot]'), close, requestClose };
   openModals.push(api);
 
   root.addEventListener('click', (e) => {
-    if (e.target === root) close();
-    if (e.target.closest('[data-close]')) close();
+    if (e.target === root) requestClose();
+    if (e.target.closest('[data-close]')) requestClose();
   });
 
   root.addEventListener('keydown', (e) => {
@@ -156,7 +192,8 @@ export function openModal({ title, subtitle = '', body, footer = '', wide = fals
 export function closeTopModal() {
   const top = openModals[openModals.length - 1];
   if (top) {
-    top.close();
+    // requestClose может спросить подтверждение и оставить окно открытым.
+    top.requestClose ? top.requestClose() : top.close();
     return true;
   }
   return false;
@@ -167,13 +204,15 @@ export function hasModal() {
 }
 
 /** Подтверждение действия. Возвращает Promise<boolean>. */
-export function confirmDialog({ title, message, confirmLabel = 'Удалить', danger = true }) {
+export function confirmDialog({ title, message, confirmLabel = 'Удалить', cancelLabel = 'Отмена', danger = true }) {
   return new Promise((resolve) => {
     let result = false;
     const modal = openModal({
       title,
       body: `<p style="margin:0;color:var(--text-2);font-size:14px;line-height:1.6"></p>`,
-      footer: `<button type="button" class="btn" data-close>Отмена</button><span class="spacer"></span><button type="button" class="btn ${
+      footer: `<button type="button" class="btn" data-close>${escapeAttr(
+        cancelLabel,
+      )}</button><span class="spacer"></span><button type="button" class="btn ${
         danger ? 'btn--danger' : 'btn--primary'
       }" data-confirm></button>`,
       onClose: () => resolve(result),

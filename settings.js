@@ -35,19 +35,46 @@ const getModel = (id, settings) =>
 export function openSettings(initialTab = 'provider') {
   let tab = initialTab;
   const draft = structuredClone(state.settings);
+  /**
+   * Были ли правки, которые пользователь не сохранил. Сравниваем с исходными
+   * настройками: без этого закрытие по Esc или клику по фону молча теряло
+   * введённый ключ и URL.
+   */
+  let dirty = false;
+  const markDirty = () => {
+    dirty = true;
+    const hint = document.querySelector('#saveHint');
+    if (hint) hint.textContent = 'Есть несохранённые изменения';
+  };
 
   const modal = openModal({
     title: 'Настройки',
     subtitle: 'Всё хранится только в этом браузере',
     wide: true,
     className: 'modal--settings',
+    // Крестик убран: закрытие только кнопкой «Закрыть» — так подтверждение
+    // при несохранённых изменениях всегда срабатывает предсказуемо.
+    hideClose: true,
     body: `<div class="settings">
       <nav class="settings__nav" id="setNav" role="tablist"></nav>
       <section class="settings__pane" id="setPane"></section>
     </div>`,
     footer: `<span class="tip" id="saveHint"></span><span class="spacer"></span>
-      <button type="button" class="btn" data-close>Закрыть</button>
-      <button type="button" class="btn btn--primary" data-save>${icon('check', 15)} Сохранить</button>`,
+      <button type="button" class="btn btn--primary" data-save>${icon('check', 15)} Сохранить</button>
+      <button type="button" class="btn btn--icon" data-close title="Закрыть" aria-label="Закрыть">${icon(
+        'close',
+        17,
+      )}</button>`,
+    onBeforeClose: async () => {
+      if (!dirty) return true;
+      return confirmDialog({
+        title: 'Закрыть без сохранения?',
+        message: 'В настройках есть несохранённые изменения. Если закрыть сейчас, они пропадут.',
+        confirmLabel: 'Закрыть без сохранения',
+        cancelLabel: 'Вернуться',
+        danger: true,
+      });
+    },
   });
 
   const nav = modal.root.querySelector('#setNav');
@@ -93,8 +120,7 @@ export function openSettings(initialTab = 'provider') {
   };
 
   const hintDirty = () => {
-    const hint = modal.root.querySelector('#saveHint');
-    if (hint) hint.textContent = 'Есть несохранённые изменения';
+    markDirty();
   };
 
   nav.addEventListener('click', (e) => {
@@ -114,6 +140,7 @@ export function openSettings(initialTab = 'provider') {
     applyTheme(draft.theme);
     applyScale(draft.fontScale);
     state.settings = draft;
+    dirty = false;
     modal.close();
     bus.emit('settings:saved');
     toast('Настройки сохранены', 'ok');
@@ -562,7 +589,7 @@ function paneProvider(d) {
         <button type="button" class="btn btn--sm" data-test>${icon('link', 14)} Проверить и загрузить модели</button>
         <span class="tip" data-test-status></span>
       </div>
-      <span class="hint" style="display:block;margin-top:6px">Запрос к /models. Найденные модели добавятся в список с примерным контекстом и нулевыми ценами — цены можно уточнить на вкладке «Модели».</span>
+      <span class="hint" style="display:block;margin-top:6px">Запрос к /models. Модели добавятся в список вместе с контекстом и уровнями усилий, если провайдер их сообщает.</span>
       <datalist id="modelsDatalist">${list.map((m) => `<option value="${escapeAttr(m.id)}"></option>`).join('')}</datalist>
     </div>
   </div>`;
@@ -573,13 +600,6 @@ function paneModels(d) {
   const rec = preset && preset.models ? preset.models : [];
   return `<h3>Модели</h3>
   <p class="pane-desc">ID модели и имя, которое видно в интерфейсе. Контекст, цены и возможности влияют на расчёты и на выбор инструментов.</p>
-  ${
-    d.models.some((m) => m.id && !m.priceIn && !m.priceOut)
-      ? `<div class="settings-block settings-block--hint">
-          <p class="tip" style="margin:0;line-height:1.65">У импортированных моделей цены нулевые: список <code>/models</code> их не отдаёт. Впишите стоимость входа и выхода в рублях за 1M токенов — тогда счётчик расхода будет точным.</p>
-        </div>`
-      : ''
-  }
   ${
     d.models.filter((m) => m.id).length
       ? ''

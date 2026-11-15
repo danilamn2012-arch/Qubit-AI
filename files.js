@@ -66,7 +66,26 @@ const STATUS_LABEL = {
 };
 
 /**
- * @param {{path:string, content?:string, ext?:string, status?:string}} file
+ * Размер и число строк файла.
+ *
+ * В сообщении они лежат в `file.bytes` / `file.lines`. У старых сообщений этих
+ * полей нет — раньше в историю сохраняли только путь и статус, и карточка
+ * упорно писала «0 Б · 0 стр.». Тогда берём данные из уже загруженного списка
+ * файлов чата, а если и там нет — считаем по содержимому.
+ */
+function statsOf(file) {
+  if (file.bytes != null && file.lines != null) return { bytes: file.bytes, lines: file.lines };
+  if (typeof file.content === 'string' && file.content) return fileStats(file.content);
+
+  const path = file.path || '';
+  const rec = (state.files || []).find((f) => f.path === path);
+  if (rec && typeof rec.content === 'string') return fileStats(rec.content);
+
+  return { bytes: file.bytes != null ? file.bytes : 0, lines: file.lines != null ? file.lines : 0 };
+}
+
+/**
+ * @param {{path:string, content?:string, ext?:string, status?:string, bytes?:number, lines?:number}} file
  * @param {{compact?:boolean}} opts
  */
 export function renderFileCard(file, opts = {}) {
@@ -76,8 +95,7 @@ export function renderFileCard(file, opts = {}) {
   // В сообщении храним только размер и число строк: полный текст файла уже
   // лежит в хранилище, дублировать его в истории чата незачем — на этом
   // раздувался контекст (сотни тысяч токенов на одну правку).
-  const bytes = file.bytes != null ? file.bytes : file.content ? new Blob([file.content]).size : 0;
-  const lines = file.lines != null ? file.lines : file.content ? lineCount(file.content) : 0;
+  const { bytes, lines } = statsOf(file);
   const meta =
     status === 'deleted'
       ? 'Файл удалён'

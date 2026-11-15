@@ -249,19 +249,6 @@
   margin-left: auto;
 }
 
-.sidebar__usage {
-  margin: var(--s-1) 4px var(--s-2);
-  padding: 9px 10px;
-  border-radius: var(--r-sm);
-  background: var(--surface-2);
-  font-size: calc(11.5px * var(--scale));
-  color: var(--muted);
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  line-height: 1.35;
-}
-
 .scrim {
   position: fixed;
   inset: 0;
@@ -1424,6 +1411,8 @@
   flex-direction: column;
   min-width: 0;
   gap: 1px;
+  /* Без этого кнопка закрытия стояла вплотную к заголовку, а не у правого края. */
+  flex: 1 1 auto;
 }
 
 /* Настройки */
@@ -1715,7 +1704,9 @@
 .toast-root {
   position: fixed;
   left: 50%;
-  bottom: 90px;
+  /* Выше композера: он занимает ~130 px на десктопе и ~150 px на телефоне,
+     поэтому 90 px наезжали на поле ввода. */
+  bottom: 156px;
   transform: translateX(-50%);
   z-index: 110;
   display: flex;
@@ -1733,22 +1724,40 @@
   max-width: 100%;
   padding: 9px 14px;
   border-radius: var(--r-full);
-  background: var(--text);
-  color: var(--bg);
+  /* Раньше фоном был var(--text), то есть на тёмной теме тост становился
+     белым. Теперь это обычная поверхность темы — как карточка. */
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border);
   font-size: calc(12.5px * var(--scale));
   font-weight: 550;
   box-shadow: var(--shadow-lg);
   animation: rise 180ms var(--ease);
 }
 
+.toast .ic {
+  color: var(--muted);
+  flex: none;
+}
+
 .toast--error {
-  background: var(--danger);
-  color: #fff;
+  background: var(--danger-soft);
+  color: var(--text);
+  border-color: color-mix(in srgb, var(--danger) 35%, var(--border));
+}
+
+.toast--error .ic {
+  color: var(--danger);
 }
 
 .toast--ok {
-  background: var(--success);
-  color: #fff;
+  background: var(--success-soft);
+  color: var(--text);
+  border-color: color-mix(in srgb, var(--success) 35%, var(--border));
+}
+
+.toast--ok .ic {
+  color: var(--success);
 }
 
 /* --------------------------- Сжатие контекста -------------------------- */
@@ -1999,7 +2008,7 @@
   }
 
   .toast-root {
-    bottom: 100px;
+    bottom: 176px;
   }
 }
 

@@ -5,7 +5,7 @@
 
 export const APP = {
   name: 'Qubit AI',
-  version: '1.3.0',
+  version: '1.3.3',
   storageKey: 'qubit.settings.v1',
 };
 

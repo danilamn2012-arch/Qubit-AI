@@ -203,14 +203,3 @@ export async function importAll(data) {
     for (const f of files || []) await putFile(rest.id, f.path, f.content);
   }
 }
-
-/** Оценка занятия места (приблизительно). */
-export async function usageEstimate() {
-  if (!navigator.storage || !navigator.storage.estimate) return null;
-  try {
-    const { usage = 0, quota = 0 } = await navigator.storage.estimate();
-    return { usage, quota };
-  } catch {
-    return null;
-  }
-}
