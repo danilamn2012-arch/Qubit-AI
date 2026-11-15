@@ -46,7 +46,20 @@ export function openSettings(initialTab = 'provider') {
    */
   const modelView = { expanded: new Set(), query: '', provider: '' };
   /** Раскрытый провайдер, черновик нового подключения и статус проверки. */
-  const providerView = { open: '', adding: false, status: {} };
+  const providerView = {
+    open: '',
+    adding: false,
+    status: {},
+    /**
+     * Введённое в форму нового провайдера.
+     *
+     * Раньше значения жили только в полях формы: перерисовка панели (например,
+     * при переключении вкладки) их теряла, а кнопка «Сохранить» внизу окна
+     * вообще не забирала форму — провайдер молча пропадал. Теперь черновик
+     * хранится здесь.
+     */
+    newDraft: { name: '', baseUrl: '', apiKey: '', headers: '', preset: 'custom' },
+  };
   /**
    * Были ли правки, которые пользователь не сохранил. Сравниваем с исходными
    * настройками: без этого закрытие по Esc или клику по фону молча теряло
@@ -136,6 +149,9 @@ export function openSettings(initialTab = 'provider') {
   });
 
   modal.root.querySelector('[data-save]').addEventListener('click', () => {
+    // Если форма нового провайдера заполнена, но «Добавить» не нажимали —
+    // добавляем её сейчас. Иначе введённый адрес и ключ просто терялись.
+    if (providerView.adding && pane.querySelector('[data-new-provider]')) commitNewProvider(true);
     // Отбрасываем пустые строки моделей, иначе в списке останется «Новая модель»
     draft.models = (draft.models || []).filter((m) => String(m.id || '').trim());
     // Модель без провайдера некуда отправить: привязываем к первому.
@@ -166,6 +182,49 @@ export function openSettings(initialTab = 'provider') {
       setTimeout(() => toast('Все модели выключены — включите хотя бы одну во вкладке «Модели».', 'info'), 900);
     }
   });
+
+  /**
+   * Добавляет провайдера из формы в черновик настроек.
+   *
+   * Возвращает true, если получилось. Если формы на экране нет (например,
+   * нажали «Сохранить» внизу окна), берём сохранённый `newDraft`.
+   */
+  const commitNewProvider = (silent) => {
+    const newForm = pane.querySelector('[data-new-provider]');
+    const src = newForm
+      ? {
+          name: newForm.querySelector('[name="newName"]').value.trim(),
+          baseUrl: newForm.querySelector('[name="newBaseUrl"]').value.trim(),
+          apiKey: newForm.querySelector('[name="newApiKey"]').value.trim(),
+          headers: newForm.querySelector('[name="newHeaders"]').value.trim(),
+          preset: newForm.dataset.preset || 'custom',
+        }
+      : { ...providerView.newDraft };
+    if (!src.baseUrl) {
+      if (!silent) toast('Укажите URL API', 'error');
+      return false;
+    }
+    const provider = {
+      ...structuredClone(DEFAULT_PROVIDER),
+      id: newProviderId(),
+      name: src.name || 'Провайдер',
+      preset: src.preset || 'custom',
+      baseUrl: src.baseUrl,
+      apiKey: src.apiKey,
+      extraHeaders: src.headers,
+    };
+    draftProviders().push(provider);
+    draft.activeProviderId = provider.id;
+    providerView.adding = false;
+    providerView.open = provider.id;
+    providerView.newDraft = { name: '', baseUrl: '', apiKey: '', headers: '', preset: 'custom' };
+    if (!silent) {
+      hintDirty();
+      render();
+      toast(`Провайдер «${provider.name}» добавлен. Загрузите его модели.`, 'ok');
+    }
+    return true;
+  };
 
   /* ------------------------------ Подключение --------------------------- */
 
@@ -269,6 +328,14 @@ export function openSettings(initialTab = 'provider') {
         form.querySelector('[name="newHeaders"]').value = p.extraHeaders || '';
         form.querySelector('[name="newName"]').value = p.name;
         form.dataset.preset = p.id;
+        // Запоминаем в черновике: перерисовка панели не должна стирать выбор.
+        providerView.newDraft = {
+          ...providerView.newDraft,
+          name: p.name,
+          baseUrl: p.baseUrl || '',
+          headers: p.extraHeaders || '',
+          preset: p.id,
+        };
         pane.querySelectorAll('[data-new-preset]').forEach((b) => b.classList.toggle('is-active', b === btn));
       });
     });
@@ -278,28 +345,15 @@ export function openSettings(initialTab = 'provider') {
     if (newForm) {
       newForm.addEventListener('submit', (e) => {
         e.preventDefault();
-        const name = newForm.querySelector('[name="newName"]').value.trim() || 'Провайдер';
-        const baseUrl = newForm.querySelector('[name="newBaseUrl"]').value.trim();
-        if (!baseUrl) {
-          toast('Укажите URL API', 'error');
-          return;
-        }
-        const provider = {
-          ...structuredClone(DEFAULT_PROVIDER),
-          id: newProviderId(),
-          name,
-          preset: newForm.dataset.preset || 'custom',
-          baseUrl,
-          apiKey: newForm.querySelector('[name="newApiKey"]').value.trim(),
-          extraHeaders: newForm.querySelector('[name="newHeaders"]').value.trim(),
-        };
-        draftProviders().push(provider);
-        draft.activeProviderId = provider.id;
-        providerView.adding = false;
-        providerView.open = provider.id;
-        hintDirty();
-        render();
-        toast(`Провайдер «${provider.name}» добавлен. Загрузите его модели.`, 'ok');
+        commitNewProvider(false);
+      });
+      // Введённое переживает перерисовку панели: без этого смена вкладки или
+      // проверка модели стирали форму вместе с адресом и ключом.
+      newForm.querySelectorAll('input[name^="new"]').forEach((input) => {
+        input.addEventListener('input', () => {
+          const key = { newName: 'name', newBaseUrl: 'baseUrl', newApiKey: 'apiKey', newHeaders: 'headers' }[input.name];
+          if (key) providerView.newDraft[key] = input.value;
+        });
       });
     }
 
@@ -930,6 +984,9 @@ function paneProvider(d, pview) {
   const providers = Array.isArray(d.providers) ? d.providers : [];
   const open = (pview && pview.open) || '';
   const adding = !!(pview && pview.adding);
+  // Введённое в форму нового провайдера: значения возвращаются в поля, чтобы
+  // перерисовка панели не стирала адрес и ключ.
+  const draft = { name: '', baseUrl: '', apiKey: '', headers: '', preset: 'custom', ...((pview && pview.newDraft) || {}) };
   const modelsOf = (id) => (d.models || []).filter((m) => m.providerId === id && m.id);
 
   return `<h3>Подключение к API</h3>
@@ -963,16 +1020,22 @@ function paneProvider(d, pview) {
           <div class="form-grid">
             <div class="field">
               <label>Название</label>
-              <input class="input" name="newName" placeholder="Например, OpenRouter" value="">
+              <input class="input" name="newName" placeholder="Например, OpenRouter" value="${escapeAttr(
+                draft.name || '',
+              )}">
             </div>
             <div class="field">
               <label>URL API</label>
-              <input class="input mono" name="newBaseUrl" id="newProviderBaseUrl" placeholder="https://api.example.com/v1" spellcheck="false">
+              <input class="input mono" name="newBaseUrl" id="newProviderBaseUrl" placeholder="https://api.example.com/v1" spellcheck="false" value="${escapeAttr(
+                draft.baseUrl || '',
+              )}">
             </div>
             <div class="field">
               <label>API-ключ</label>
               <div style="display:flex;gap:6px">
-                <input class="input mono" name="newApiKey" type="password" placeholder="sk-…" autocomplete="off" spellcheck="false">
+                <input class="input mono" name="newApiKey" type="password" placeholder="sk-…" autocomplete="off" spellcheck="false" value="${escapeAttr(
+                  draft.apiKey || '',
+                )}">
                 <button type="button" class="icon-btn" data-toggle-key="#newProviderKey" aria-label="Показать ключ">${icon(
                   'eye',
                   16,
@@ -981,7 +1044,9 @@ function paneProvider(d, pview) {
             </div>
             <div class="field">
               <label>Дополнительные заголовки</label>
-              <textarea class="textarea mono" name="newHeaders" rows="2" spellcheck="false" placeholder="HTTP-Referer: https://example.com"></textarea>
+              <textarea class="textarea mono" name="newHeaders" rows="2" spellcheck="false" placeholder="HTTP-Referer: https://example.com">${html(
+                draft.headers || '',
+              )}</textarea>
             </div>
           </div>
           <div class="row" style="margin-top:12px;flex-wrap:wrap">
